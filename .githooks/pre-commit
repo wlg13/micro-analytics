@@ -1,0 +1,15 @@
+#!/bin/bash
+
+badfiles=$(git diff --cached --name-only | \
+    grep -Ei '\.(csv|xlsx|xls|tsv)$')
+
+if [ -n "$badfiles" ]; then
+    echo
+    echo "ERROR: Possible student-data file being committed:"
+    echo "$badfiles"
+    echo
+    echo "Commit cancelled."
+    exit 1
+fi
+
+exit 0

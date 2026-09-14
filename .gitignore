@@ -22,3 +22,9 @@ desktop.ini
 # Output / temp
 *.log
 *.tmp
+
+# Possible student data
+*.csv
+*.xlxs
+*.xls
+*.tsv

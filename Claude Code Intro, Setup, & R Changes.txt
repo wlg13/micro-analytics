@@ -1,0 +1,9 @@
+file.edit("~/.Renvviron") then put in
+MA=C:/Users/billg/OneDrive - The Pennsylvania State University/104/104 Database -- Micro-analytics/
+
+Rscript added so can run Rscript file.R
+
+https://support.claude.com/en/articles/14552382-your-first-day-in-claude-code
+
+next time for Claude Code
+claude --resume 7422b8d4-0419-4555-89c1-1648d79d6d16

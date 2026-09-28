@@ -1,7 +1,7 @@
 Attribute VB_Name = "HashInputs"
 ' Make a de-identified copy of every file in inputs\ in inputs-dev\.
 '
-' Identifying columns (listed in IdHeaders, EmailHeaders, NameHeaders) are
+' Columns marked "hash" in hash_columns.xlsx (IDs, emails, names, ...) are
 ' replaced by a keyed hash (HMAC-SHA256, first 16 hex characters). Every
 ' other cell is copied unchanged, so inputs-dev has the same files, sheets,
 ' column headers and column types as inputs. The same value always gets the
@@ -16,20 +16,31 @@ Attribute VB_Name = "HashInputs"
 ' Each time the inputs change:
 '   Run HashInputsToDev.
 '
+' Column names:
+'   hash_columns.xlsx (in BASE_DIR) lists every column name the macro knows,
+'   each marked "hash" or "keep". It is created on the first run with the
+'   roster and survey columns already filled in. When a file has a column
+'   name that is not in the list, the macro shows it with a few example
+'   values and asks whether to hash or keep it, then saves your answer, so
+'   each new name is asked about only once. You can also open the file and
+'   add or change rows yourself. Names ignore case; * is a wildcard (e.g.
+'   "Quiz *" covers every column starting with "Quiz ").
+'
 ' Safety:
 '   - Files in inputs\ are opened read-only and never saved.
-'   - If any column header is in none of the four lists below, the macro
-'     stops before writing anything and lists those headers. Add each to a
-'     hash list or to SafeHeaders, then run again. So a new column (e.g. a
-'     free-text survey question) can't reach inputs-dev unreviewed.
+'   - Nothing is written until every column has an answer.
 '   - CSV files are processed as text, not opened in Excel, so leading
 '     zeros, long numbers and dates in the other columns are not changed.
+'   - Hashed values that look like email addresses are lowercased first,
+'     so Jane@PSU.edu and jane@psu.edu get the same hash.
 
 Option Explicit
 
 Private Const BASE_DIR As String = "C:\Users\billg\OneDrive - The Pennsylvania State University\104\104 Database -- Micro-analytics"
 Private Const KEY_FILE As String = "hash_key.txt"
+Private Const SETTINGS_FILE As String = "hash_columns.xlsx"
 Private Const HASH_HEX_CHARS As Long = 16
+Private Const MAX_SAMPLES As Long = 3
 
 Private Const CP_UTF8 As Long = 65001
 Private Const CP_ANSI As Long = 1252
@@ -50,36 +61,26 @@ Private Declare PtrSafe Function WideCharToMultiByte Lib "kernel32" (ByVal CodeP
 Private mAlg As LongPtr
 Private mKey() As Byte
 Private mOpenWb As Workbook
+Private mNames As Collection     ' column names (may contain *) from hash_columns.xlsx
+Private mActions As Collection   ' "hash" or "keep", same order as mNames
 
-' ---- Header lists: edit these ----
-' Matching ignores case; * and ? work as wildcards.
-' IDs: trimmed, whole numbers written without decimals, then hashed.
-Private Function IdHeaders() As Variant
-    IdHeaders = Array("ID", "PSU ID", "Campus ID")
+' Rows written to hash_columns.xlsx when it is first created.
+Private Function DefaultHashNames() As Variant
+    DefaultHashNames = Array("ID", "PSU ID", "Campus ID", "Email", "sis_id", _
+                             "Name", "First Name", "Last Name", "Pronouns")
 End Function
 
-' Emails: trimmed and lowercased, then hashed (merge_rosters.R joins on
-' lowercased email).
-Private Function EmailHeaders() As Variant
-    EmailHeaders = Array("Email", "sis_id")
-End Function
-
-' Names and other identifying text: trimmed, then hashed.
-Private Function NameHeaders() As Variant
-    NameHeaders = Array("Name", "First Name", "Last Name", "Pronouns")
-End Function
-
-' Not identifying: copied unchanged.
-Private Function SafeHeaders() As Variant
-    SafeHeaders = Array("Notify", "Units", "Program and Plan", "Level", "Status Note", "Section", _
-                        "100874763*")
+Private Function DefaultKeepNames() As Variant
+    DefaultKeepNames = Array("Notify", "Units", "Program and Plan", "Level", "Status Note", "Section", _
+                             "100874763*")
 End Function
 
 ' ---- Macros to run ----
 
 Public Sub HashInputsToDev()
     Dim msg As String
-    msg = HashFolder(BASE_DIR & "\inputs", BASE_DIR & "\inputs-dev", BASE_DIR & "\" & KEY_FILE)
+    msg = HashFolder(BASE_DIR & "\inputs", BASE_DIR & "\inputs-dev", BASE_DIR & "\" & KEY_FILE, _
+                     BASE_DIR & "\" & SETTINGS_FILE)
     MsgBox msg, IIf(Left$(msg, 7) = "STOPPED", vbExclamation, vbInformation), "Hash inputs"
 End Sub
 
@@ -106,9 +107,14 @@ End Sub
 ' ---- Core (public so it can be tested on other folders) ----
 
 ' Returns a summary; starts with "STOPPED" if nothing (or not everything) was written.
-Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String) As String
-    Dim fso As Object, files As New Collection, unknown As Object
-    Dim f As Variant, skipped As String, msg As String, n As Long
+' testAnswer is for automated tests only: "hash", "keep" or "stop" answers every
+' new-column question without showing a dialog.
+Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
+                           ByVal settingsPath As String, Optional ByVal testAnswer As String = "") As String
+    Dim fso As Object, files As New Collection, newCols As Object, blockers As Object
+    Dim f As Variant, k As Variant, it As Variant, ans As String
+    Dim skipped As String, msg As String, n As Long
+    Dim addNames As New Collection, addActions As New Collection, addFiles As New Collection
 
     On Error GoTo Fail
     Set fso = CreateObject("Scripting.FileSystemObject")
@@ -130,21 +136,41 @@ Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal 
         End If
     Next
 
-    Set unknown = CreateObject("Scripting.Dictionary")
     SetQuiet True
+    msg = LoadSettings(settingsPath)
+    If msg <> "" Then Cleanup: HashFolder = "STOPPED: nothing was written. " & msg: Exit Function
 
-    ' Pass 1: check every header before writing anything.
+    ' Pass 1: read every header; collect names not in hash_columns.xlsx.
+    Set newCols = CreateObject("Scripting.Dictionary")
+    Set blockers = CreateObject("Scripting.Dictionary")
     For Each f In files
-        ProcessFile inDir & "\" & f, "", False, unknown
+        ProcessFile inDir & "\" & f, "", False, newCols, blockers
     Next
-    If unknown.Count > 0 Then
-        SetQuiet False
-        Erase mKey
-        HashFolder = "STOPPED: nothing was written. These columns are not in any header list:" & vbLf & "  " & _
-                     Join(unknown.Keys, vbLf & "  ") & vbLf & vbLf & _
-                     "Add each to IdHeaders, EmailHeaders or NameHeaders (to hash it) or to SafeHeaders " & _
-                     "(to copy it unchanged), then run again."
+    If blockers.Count > 0 Then
+        Cleanup
+        HashFolder = "STOPPED: nothing was written. These columns have data but no name:" & vbLf & "  " & _
+                     Join(blockers.Keys, vbLf & "  ") & vbLf & vbLf & "Give each a header, or delete it, then run again."
         Exit Function
+    End If
+
+    ' Ask about each new name once, and save the answers.
+    If newCols.Count > 0 Then
+        SetQuiet False
+        For Each k In newCols.Keys
+            it = newCols(k)
+            ans = AskColumn(it(0), it(1), it(2), testAnswer)
+            If ans = "stop" Then Exit For
+            addNames.Add it(0): addActions.Add ans: addFiles.Add it(1)
+            mNames.Add it(0): mActions.Add ans
+        Next
+        SetQuiet True
+        If addNames.Count > 0 Then SaveAnswers settingsPath, addNames, addActions, addFiles
+        If ans = "stop" Then
+            Cleanup
+            HashFolder = "STOPPED: nothing was written." & vbLf & addNames.Count & _
+                         " answer(s) given before stopping were saved in " & settingsPath & "."
+            Exit Function
+        End If
     End If
 
     ' Pass 2: write the hashed copies.
@@ -152,12 +178,13 @@ Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal 
         Err.Raise vbObjectError + 1, , "Could not open the Windows SHA-256 provider."
     End If
     For Each f In files
-        ProcessFile inDir & "\" & f, outDir & "\" & f, True, unknown
+        ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, blockers
         n = n + 1
     Next
     Cleanup
 
     msg = "Hashed " & n & " file(s) from" & vbLf & "  " & inDir & vbLf & "into" & vbLf & "  " & outDir
+    If addNames.Count > 0 Then msg = msg & vbLf & vbLf & addNames.Count & " new column name(s) saved in " & settingsPath & "."
     If skipped <> "" Then msg = msg & vbLf & vbLf & "Skipped (not csv/xlsx/xls), not copied:" & skipped
     HashFolder = msg
     Exit Function
@@ -185,59 +212,172 @@ Private Sub SetQuiet(ByVal quiet As Boolean)
     Application.EnableEvents = Not quiet
 End Sub
 
-Private Sub ProcessFile(ByVal inPath As String, ByVal outPath As String, ByVal doWrite As Boolean, unknown As Object)
+Private Sub ProcessFile(ByVal inPath As String, ByVal outPath As String, ByVal doWrite As Boolean, _
+                        newCols As Object, blockers As Object)
     If LCase$(Right$(inPath, 4)) = ".csv" Then
-        HashCsv inPath, outPath, doWrite, unknown
+        HashCsv inPath, outPath, doWrite, newCols, blockers
     Else
-        HashWorkbook inPath, outPath, doWrite, unknown
+        HashWorkbook inPath, outPath, doWrite, newCols, blockers
     End If
 End Sub
 
-' ---- Header classification ----
+' ---- Column names (hash_columns.xlsx) ----
 
-' Returns "id", "email", "name", "safe", or "" if the header is in no list.
-Private Function ClassifyHeader(ByVal h As String) As String
-    h = Trim$(h)
+' Returns "hash", "keep", or "" if the name is not listed. First matching row wins.
+Private Function ColumnAction(ByVal h As String) As String
+    Dim i As Long
+    h = LCase$(Trim$(h))
     If h = "" Then Exit Function
-    If InList(h, IdHeaders()) Then
-        ClassifyHeader = "id"
-    ElseIf InList(h, EmailHeaders()) Then
-        ClassifyHeader = "email"
-    ElseIf InList(h, NameHeaders()) Then
-        ClassifyHeader = "name"
-    ElseIf InList(h, SafeHeaders()) Then
-        ClassifyHeader = "safe"
-    End If
-End Function
-
-Private Function InList(ByVal h As String, ByVal patterns As Variant) As Boolean
-    Dim p As Variant
-    For Each p In patterns
-        If LCase$(h) Like LCase$(p) Then InList = True: Exit Function
+    For i = 1 To mNames.Count
+        If h Like LikePattern(mNames(i)) Then ColumnAction = mActions(i): Exit Function
     Next
 End Function
 
-Private Sub AddUnknown(unknown As Object, ByVal s As String)
-    If Not unknown.Exists(s) Then unknown.Add s, True
+' Only * is a wildcard; [ # ? in names are matched literally.
+Private Function LikePattern(ByVal nm As String) As String
+    nm = LCase$(Trim$(nm))
+    nm = Replace(nm, "[", "[[]")
+    nm = Replace(nm, "#", "[#]")
+    nm = Replace(nm, "?", "[?]")
+    LikePattern = nm
+End Function
+
+' Returns "" on success, else a problem description.
+Private Function LoadSettings(ByVal path As String) As String
+    Dim wb As Workbook, ws As Worksheet, mine As Boolean
+    Dim r As Long, lastRow As Long, nm As String, act As String, bad As String
+
+    Set mNames = New Collection
+    Set mActions = New Collection
+    If Len(Dir$(path)) = 0 Then CreateSettings path
+
+    Set wb = OpenWb(path, True, mine)
+    Set ws = wb.Worksheets(1)
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    For r = 2 To lastRow
+        nm = "": act = ""
+        If Not IsError(ws.Cells(r, 1).Value) Then nm = Trim$(CStr(ws.Cells(r, 1).Value))
+        If Not IsError(ws.Cells(r, 2).Value) Then act = LCase$(Trim$(CStr(ws.Cells(r, 2).Value)))
+        If nm <> "" Then
+            If act = "hash" Or act = "keep" Then
+                mNames.Add nm
+                mActions.Add act
+            Else
+                bad = bad & vbLf & "  row " & r & ": " & nm & " -> """ & act & """"
+            End If
+        End If
+    Next
+    If mine Then wb.Close SaveChanges:=False
+    If bad <> "" Then LoadSettings = "In " & path & ", the Action column must be hash or keep:" & bad
+End Function
+
+Private Sub CreateSettings(ByVal path As String)
+    Dim wb As Workbook, ws As Worksheet, nm As Variant, r As Long
+    Set wb = Workbooks.Add(xlWBATWorksheet)
+    Set ws = wb.Worksheets(1)
+    ws.Name = "Columns"
+    ws.Range("A1:C1").Value = Array("Column name", "Action", "First seen in")
+    ws.Range("A1:C1").Font.Bold = True
+    ws.Range("E1").Value = "Action: hash = replace values with a keyed hash (anything that identifies a student); " & _
+                           "keep = copy unchanged. Names ignore case; * is a wildcard."
+    r = 2
+    For Each nm In DefaultHashNames()
+        ws.Cells(r, 1).Value = nm: ws.Cells(r, 2).Value = "hash": ws.Cells(r, 3).Value = "(default)"
+        r = r + 1
+    Next
+    For Each nm In DefaultKeepNames()
+        ws.Cells(r, 1).Value = nm: ws.Cells(r, 2).Value = "keep": ws.Cells(r, 3).Value = "(default)"
+        r = r + 1
+    Next
+    ws.Columns("A:C").AutoFit
+    wb.SaveAs Filename:=path, FileFormat:=xlOpenXMLWorkbook
+    wb.Close SaveChanges:=False
+End Sub
+
+Private Sub SaveAnswers(ByVal path As String, names As Collection, actions As Collection, files As Collection)
+    Dim wb As Workbook, ws As Worksheet, mine As Boolean, r As Long, i As Long
+    Set wb = OpenWb(path, False, mine)
+    Set ws = wb.Worksheets(1)
+    r = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row + 1
+    For i = 1 To names.Count
+        ws.Cells(r, 1).NumberFormat = "@"
+        ws.Cells(r, 1).Value = names(i)
+        ws.Cells(r, 2).Value = actions(i)
+        ws.Cells(r, 3).Value = files(i)
+        r = r + 1
+    Next
+    wb.Save
+    If mine Then wb.Close SaveChanges:=False
+End Sub
+
+' Uses the workbook if it is already open in Excel (mine = False), else opens it.
+Private Function OpenWb(ByVal path As String, ByVal readOnly As Boolean, mine As Boolean) As Workbook
+    Dim w As Workbook, nm As String
+    nm = Mid$(path, InStrRev(path, "\") + 1)
+    For Each w In Workbooks
+        If StrComp(w.Name, nm, vbTextCompare) = 0 Then Set OpenWb = w: mine = False: Exit Function
+    Next
+    Set OpenWb = Workbooks.Open(Filename:=path, UpdateLinks:=0, ReadOnly:=readOnly, AddToMru:=False)
+    mine = True
+End Function
+
+' Returns "hash", "keep" or "stop".
+Private Function AskColumn(ByVal h As String, ByVal fname As String, ByVal samples As String, _
+                           ByVal testAnswer As String) As String
+    Dim prompt As String
+    If testAnswer <> "" Then AskColumn = LCase$(testAnswer): Exit Function
+    If samples = "" Then samples = "  (all blank)" & vbLf
+    prompt = "New column name:  " & h & vbLf & "In file:  " & fname & vbLf & vbLf & _
+             "Example values:" & vbLf & samples & vbLf & _
+             "Could this column identify a student (name, ID, email, username, free-text answer)?" & vbLf & vbLf & _
+             "Yes  = HASH it" & vbLf & "No   = KEEP it unchanged" & vbLf & "Cancel = stop (nothing is written)" & vbLf & vbLf & _
+             "Your answer is saved in hash_columns.xlsx, so you won't be asked about this name again."
+    Select Case MsgBox(prompt, vbYesNoCancel + vbQuestion + vbDefaultButton1, "New column")
+        Case vbYes: AskColumn = "hash"
+        Case vbNo: AskColumn = "keep"
+        Case Else: AskColumn = "stop"
+    End Select
+End Function
+
+' Records a header that is not in hash_columns.xlsx (once per name, ignoring case).
+Private Sub NoteNew(newCols As Object, ByVal h As String, ByVal fname As String)
+    If Not newCols.Exists(LCase$(h)) Then newCols.Add LCase$(h), Array(h, fname, "", 0)
+End Sub
+
+Private Sub AddSample(newCols As Object, ByVal h As String, ByVal v As String)
+    Dim it As Variant
+    If v = "" Or Not newCols.Exists(LCase$(h)) Then Exit Sub
+    it = newCols(LCase$(h))
+    If it(3) >= MAX_SAMPLES Then Exit Sub
+    If Len(v) > 40 Then v = Left$(v, 40) & "..."
+    it(2) = it(2) & "  " & v & vbLf
+    it(3) = it(3) + 1
+    newCols(LCase$(h)) = it
+End Sub
+
+Private Sub AddBlocker(blockers As Object, ByVal s As String)
+    If Not blockers.Exists(s) Then blockers.Add s, True
 End Sub
 
 ' ---- Excel workbooks ----
 
-Private Sub HashWorkbook(ByVal inPath As String, ByVal outPath As String, ByVal doWrite As Boolean, unknown As Object)
+Private Sub HashWorkbook(ByVal inPath As String, ByVal outPath As String, ByVal doWrite As Boolean, _
+                         newCols As Object, blockers As Object)
     Dim ws As Worksheet, fname As String
     fname = Mid$(inPath, InStrRev(inPath, "\") + 1)
     Set mOpenWb = Workbooks.Open(Filename:=inPath, UpdateLinks:=0, ReadOnly:=True, AddToMru:=False)
     For Each ws In mOpenWb.Worksheets
-        HashSheet ws, fname, doWrite, unknown
+        HashSheet ws, fname, doWrite, newCols, blockers
     Next
     If doWrite Then mOpenWb.SaveAs Filename:=outPath, FileFormat:=mOpenWb.FileFormat
     mOpenWb.Close SaveChanges:=False
     Set mOpenWb = Nothing
 End Sub
 
-Private Sub HashSheet(ws As Worksheet, ByVal fname As String, ByVal doWrite As Boolean, unknown As Object)
+Private Sub HashSheet(ws As Worksheet, ByVal fname As String, ByVal doWrite As Boolean, _
+                      newCols As Object, blockers As Object)
     Dim lastRow As Long, lastCol As Long, c As Long, r As Long
-    Dim h As String, kind As String, s As String, rng As Range, vals As Variant
+    Dim h As String, act As String, s As String, rng As Range, vals As Variant
 
     If Application.WorksheetFunction.CountA(ws.Cells) = 0 Then Exit Sub
     lastRow = ws.Cells.Find("*", LookIn:=xlFormulas, LookAt:=xlPart, SearchOrder:=xlByRows, SearchDirection:=xlPrevious).Row
@@ -246,27 +386,35 @@ Private Sub HashSheet(ws As Worksheet, ByVal fname As String, ByVal doWrite As B
     For c = 1 To lastCol
         h = ""
         If Not IsError(ws.Cells(1, c).Value) Then h = Trim$(CStr(ws.Cells(1, c).Value))
-        kind = ClassifyHeader(h)
-        If lastRow >= 2 Then Set rng = ws.Range(ws.Cells(2, c), ws.Cells(lastRow, c))
-
-        If kind = "" Then
-            If h <> "" Then
-                AddUnknown unknown, fname & " [" & ws.Name & "]: " & h
-            ElseIf lastRow >= 2 Then
-                If Application.WorksheetFunction.CountA(rng) > 0 Then
-                    AddUnknown unknown, fname & " [" & ws.Name & "]: unnamed column " & c
-                End If
-            End If
-        ElseIf kind <> "safe" And doWrite And lastRow >= 2 Then
+        act = ColumnAction(h)
+        vals = Empty
+        If lastRow >= 2 Then
+            Set rng = ws.Range(ws.Cells(2, c), ws.Cells(lastRow, c))
             If rng.Cells.Count = 1 Then
                 ReDim vals(1 To 1, 1 To 1)
                 vals(1, 1) = rng.Value2
             Else
                 vals = rng.Value2
             End If
+        End If
+
+        If act = "" Then
+            If h <> "" Then
+                NoteNew newCols, h, fname
+                If Not IsEmpty(vals) Then
+                    For r = 1 To UBound(vals, 1)
+                        If Not IsError(vals(r, 1)) Then AddSample newCols, h, Trim$(CStr(vals(r, 1)))
+                    Next
+                End If
+            ElseIf Not IsEmpty(vals) Then
+                If Application.WorksheetFunction.CountA(rng) > 0 Then
+                    AddBlocker blockers, fname & " [" & ws.Name & "]: column " & c
+                End If
+            End If
+        ElseIf act = "hash" And doWrite And Not IsEmpty(vals) Then
             For r = 1 To UBound(vals, 1)
                 If Not IsEmpty(vals(r, 1)) And Not IsError(vals(r, 1)) Then
-                    s = NormalizeValue(vals(r, 1), kind)
+                    s = NormalizeValue(vals(r, 1))
                     If s <> "" Then vals(r, 1) = HmacHex(s)
                 End If
             Next
@@ -278,11 +426,12 @@ End Sub
 
 ' ---- CSV files (as text, so untouched fields keep their exact characters) ----
 
-Private Sub HashCsv(ByVal inPath As String, ByVal outPath As String, ByVal doWrite As Boolean, unknown As Object)
+Private Sub HashCsv(ByVal inPath As String, ByVal outPath As String, ByVal doWrite As Boolean, _
+                    newCols As Object, blockers As Object)
     Dim b() As Byte, ob() As Byte, hasBom As Boolean, start As Long, cp As Long, ok As Boolean
     Dim text As String, L As Long, pos As Long, raw As String, term As String, outRaw As String
     Dim fname As String, rowNum As Long, col As Long, nHead As Long
-    Dim heads() As String, kinds() As String, kind As String, hname As String, v As String
+    Dim heads() As String, acts() As String, act As String, hname As String, v As String
     Dim parts() As String, np As Long, i As Long
 
     fname = Mid$(inPath, InStrRev(inPath, "\") + 1)
@@ -299,7 +448,7 @@ Private Sub HashCsv(ByVal inPath As String, ByVal outPath As String, ByVal doWri
     L = Len(text)
     pos = 1
     rowNum = 1
-    ReDim heads(0 To 0): ReDim kinds(0 To 0)
+    ReDim heads(0 To 0): ReDim acts(0 To 0)
     ReDim parts(0 To 1023)
 
     If L > 0 Then
@@ -308,18 +457,22 @@ Private Sub HashCsv(ByVal inPath As String, ByVal outPath As String, ByVal doWri
             col = col + 1
             outRaw = raw
             If rowNum = 1 Then
-                ReDim Preserve heads(0 To col): ReDim Preserve kinds(0 To col)
+                ReDim Preserve heads(0 To col): ReDim Preserve acts(0 To col)
                 heads(col) = Trim$(Unquote(raw))
-                kinds(col) = ClassifyHeader(heads(col))
-                If kinds(col) = "" And heads(col) <> "" Then AddUnknown unknown, fname & ": " & heads(col)
+                acts(col) = ColumnAction(heads(col))
+                If acts(col) = "" And heads(col) <> "" Then NoteNew newCols, heads(col), fname
             Else
                 v = Trim$(Unquote(raw))
-                kind = "": hname = ""
-                If col <= nHead Then kind = kinds(col): hname = heads(col)
-                If kind = "" Then
-                    If hname = "" And v <> "" Then AddUnknown unknown, fname & ": unnamed column " & col
-                ElseIf kind <> "safe" And v <> "" And doWrite Then
-                    outRaw = HmacHex(NormalizeValue(Unquote(raw), kind))
+                act = "": hname = ""
+                If col <= nHead Then act = acts(col): hname = heads(col)
+                If act = "" Then
+                    If hname <> "" Then
+                        AddSample newCols, hname, v
+                    ElseIf v <> "" Then
+                        AddBlocker blockers, fname & ": column " & col
+                    End If
+                ElseIf act = "hash" And v <> "" And doWrite Then
+                    outRaw = HmacHex(NormalizeValue(Unquote(raw)))
                 End If
             End If
 
@@ -410,8 +563,10 @@ End Function
 
 ' ---- Hashing ----
 
-' Same text form R uses: IDs stored as numbers lose any ".0", emails are lowercased.
-Private Function NormalizeValue(ByVal v As Variant, ByVal kind As String) As String
+' Same text form R uses: numbers stored in Excel lose any ".0"; values that
+' look like email addresses are lowercased (merge_rosters.R joins on
+' lowercased email).
+Private Function NormalizeValue(ByVal v As Variant) As String
     Dim s As String
     If VarType(v) = vbDouble Or VarType(v) = vbCurrency Or VarType(v) = vbLong Or VarType(v) = vbInteger Then
         If v = Fix(v) And Abs(v) < 1E+15 Then s = Format$(v, "0") Else s = CStr(v)
@@ -419,7 +574,7 @@ Private Function NormalizeValue(ByVal v As Variant, ByVal kind As String) As Str
         s = CStr(v)
     End If
     s = Trim$(s)
-    If kind = "email" Then s = LCase$(s)
+    If s Like "*?@?*.?*" And InStr(s, " ") = 0 Then s = LCase$(s)
     NormalizeValue = s
 End Function
 

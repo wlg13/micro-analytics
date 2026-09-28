@@ -25,6 +25,9 @@ desktop.ini
 
 # Possible student data
 *.csv
-*.xlxs
+*.xlsx
 *.xls
 *.tsv
+
+# Synthetic dev data (regenerate with make_dev_data.R)
+dev_data/

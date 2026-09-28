@@ -42,7 +42,7 @@ n_no_survey <- sum(!tolower(merged_roster$Email) %in% survey$email_key)
 message("Survey: ", nrow(survey), " rows (", n_no_survey, " roster students with no survey submission)")
 
 merged_roster <- merged_roster %>%
-  select(`First Name`, `Last Name`, ID, Email, Level, FirstGen = `First Generation`, `Program and Plan`)
+  select(`First Name`, `Last Name`, ID, Email, Section, Level, FirstGen = `First Generation`, `Program and Plan`)
 
 if (!dir.exists(outputs_dir)) dir.create(outputs_dir, recursive = TRUE)
 

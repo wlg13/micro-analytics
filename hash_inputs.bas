@@ -13,22 +13,26 @@ Attribute VB_Name = "HashInputs"
 '      the inputs folders.)
 '   2. Run MakeHashKey. It creates hash_key.txt in BASE_DIR. Never share it,
 '      commit it, or copy it into inputs-dev.
-' Each time the inputs change:
-'   Run HashInputsToDev.
+' Each time you add or update a file in inputs\:
+'   Run HashFileToDev and pick the file(s). It asks before writing each one.
+' To redo every file (e.g. after changing an answer in hash_columns.xlsx):
+'   Run HashInputsToDev. It lists all the files and asks once before writing.
 '
 ' Column names:
 '   hash_columns.xlsx (in BASE_DIR) lists every column name the macro knows,
 '   each marked "hash" or "keep". It is created on the first run with the
 '   roster and survey columns already filled in. When a file has a column
 '   name that is not in the list, the macro shows it with a few example
-'   values and asks whether to hash or keep it, then saves your answer, so
-'   each new name is asked about only once. You can also open the file and
+'   values and asks whether to hash or keep it. Your answers are saved when
+'   a file is written, so each new name is asked about only once. You can also open the file and
 '   add or change rows yourself. Names ignore case; * is a wildcard (e.g.
 '   "Quiz *" covers every column starting with "Quiz ").
 '
 ' Safety:
 '   - Files in inputs\ are opened read-only and never saved.
-'   - Nothing is written until every column has an answer.
+'   - Nothing is written to inputs-dev, and no answers are saved to
+'     hash_columns.xlsx, until every column has an answer and you click OK.
+'     (The first run creates hash_columns.xlsx before asking anything.)
 '   - CSV files are processed as text, not opened in Excel, so leading
 '     zeros, long numbers and dates in the other columns are not changed.
 '   - Hashed values that look like email addresses are lowercased first,
@@ -77,6 +81,33 @@ End Function
 
 ' ---- Macros to run ----
 
+' Hash one or more files you pick in inputs\, asking before each is written.
+Public Sub HashFileToDev()
+    Dim fso As Object, inDir As String, p As Variant, list As String, msg As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    inDir = fso.GetAbsolutePathName(BASE_DIR & "\inputs")
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = "Pick the file(s) in inputs to hash into inputs-dev"
+        .InitialFileName = inDir & "\"
+        .AllowMultiSelect = True
+        .Filters.Clear
+        .Filters.Add "Data files", "*.csv; *.xlsx; *.xlsm; *.xls"
+        If .Show <> -1 Then Exit Sub
+        For Each p In .SelectedItems
+            If StrComp(fso.GetParentFolderName(p), inDir, vbTextCompare) <> 0 Then
+                MsgBox "Only files directly in" & vbLf & "  " & inDir & vbLf & "can be hashed. Nothing was written.", _
+                       vbExclamation, "Hash file"
+                Exit Sub
+            End If
+            list = list & "|" & fso.GetFileName(p)
+        Next
+    End With
+    msg = HashFileList(inDir, BASE_DIR & "\inputs-dev", BASE_DIR & "\" & KEY_FILE, _
+                       BASE_DIR & "\" & SETTINGS_FILE, Mid$(list, 2))
+    MsgBox msg, IIf(Left$(msg, 7) = "STOPPED", vbExclamation, vbInformation), "Hash file"
+End Sub
+
+' Hash every file in inputs\, after one confirmation listing what will be written.
 Public Sub HashInputsToDev()
     Dim msg As String
     msg = HashFolder(BASE_DIR & "\inputs", BASE_DIR & "\inputs-dev", BASE_DIR & "\" & KEY_FILE, _
@@ -106,39 +137,75 @@ End Sub
 
 ' ---- Core (public so it can be tested on other folders) ----
 
-' Returns a summary; starts with "STOPPED" if nothing (or not everything) was written.
-' testAnswer is for automated tests only: "hash", "keep" or "stop" answers every
-' new-column question without showing a dialog.
+' Both return a summary that starts with "STOPPED" if nothing was written.
+' testAnswer and testConfirm are for automated tests only: testAnswer ("hash",
+' "keep" or "stop") answers every new-column question and testConfirm ("yes"
+' or "no") every write confirmation, without showing dialogs.
+
+' Every csv/xlsx/xls file in inDir, with one confirmation for all of them.
 Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
-                           ByVal settingsPath As String, Optional ByVal testAnswer As String = "") As String
-    Dim fso As Object, files As New Collection, newCols As Object, blockers As Object
-    Dim f As Variant, k As Variant, it As Variant, ans As String
-    Dim skipped As String, msg As String, n As Long
+                           ByVal settingsPath As String, Optional ByVal testAnswer As String = "", _
+                           Optional ByVal testConfirm As String = "") As String
+    Dim fso As Object, files As New Collection, f As Variant, skipped As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(inDir) Then HashFolder = "STOPPED: input folder not found: " & inDir: Exit Function
+    For Each f In fso.GetFolder(inDir).files
+        If Left$(f.Name, 2) <> "~$" Then
+            If IsDataFile(f.Name) Then files.Add f.Name Else skipped = skipped & vbLf & "  " & f.Name
+        End If
+    Next
+    HashFolder = RunHash(inDir, outDir, keyPath, settingsPath, files, skipped, False, testAnswer, testConfirm)
+End Function
+
+' The files named in fileList (names in inDir separated by "|"), with one
+' confirmation per file.
+Public Function HashFileList(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
+                             ByVal settingsPath As String, ByVal fileList As String, _
+                             Optional ByVal testAnswer As String = "", Optional ByVal testConfirm As String = "") As String
+    Dim fso As Object, files As New Collection, f As Variant
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    For Each f In Split(fileList, "|")
+        If Not fso.FileExists(inDir & "\" & f) Then
+            HashFileList = "STOPPED: nothing was written. File not found: " & inDir & "\" & f: Exit Function
+        End If
+        If Not IsDataFile(f) Then
+            HashFileList = "STOPPED: nothing was written. Not a csv/xlsx/xls file: " & f: Exit Function
+        End If
+        files.Add CStr(f)
+    Next
+    If files.Count = 0 Then HashFileList = "STOPPED: no file was picked.": Exit Function
+    HashFileList = RunHash(inDir, outDir, keyPath, settingsPath, files, "", True, testAnswer, testConfirm)
+End Function
+
+Private Function IsDataFile(ByVal nm As String) As Boolean
+    Select Case LCase$(Mid$(nm, InStrRev(nm, ".") + 1))
+        Case "csv", "xlsx", "xlsm", "xls": IsDataFile = True
+    End Select
+End Function
+
+Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
+                         ByVal settingsPath As String, files As Collection, ByVal skipped As String, _
+                         ByVal perFile As Boolean, ByVal testAnswer As String, ByVal testConfirm As String) As String
+    Dim fso As Object, newCols As Object, blockers As Object
+    Dim f As Variant, k As Variant, it As Variant, ans As String, prompt As String, settingsName As String
+    Dim msg As String, written As String, declined As String, nWritten As Long, i As Long, answersSaved As Boolean
     Dim addNames As New Collection, addActions As New Collection, addFiles As New Collection
 
     On Error GoTo Fail
     Set fso = CreateObject("Scripting.FileSystemObject")
-    If Not fso.FolderExists(inDir) Then HashFolder = "STOPPED: input folder not found: " & inDir: Exit Function
-    If Not fso.FolderExists(outDir) Then HashFolder = "STOPPED: output folder not found: " & outDir: Exit Function
+    If Not fso.FolderExists(inDir) Then RunHash = "STOPPED: input folder not found: " & inDir: Exit Function
+    If Not fso.FolderExists(outDir) Then RunHash = "STOPPED: output folder not found: " & outDir: Exit Function
     inDir = fso.GetAbsolutePathName(inDir)
     outDir = fso.GetAbsolutePathName(outDir)
-    If StrComp(inDir, outDir, vbTextCompare) = 0 Then HashFolder = "STOPPED: input and output folders are the same.": Exit Function
-    If Not fso.FileExists(keyPath) Then HashFolder = "STOPPED: no key file at " & keyPath & ". Run MakeHashKey first.": Exit Function
+    If StrComp(inDir, outDir, vbTextCompare) = 0 Then RunHash = "STOPPED: input and output folders are the same.": Exit Function
+    If Not fso.FileExists(keyPath) Then RunHash = "STOPPED: no key file at " & keyPath & ". Run MakeHashKey first.": Exit Function
     msg = LoadKey(keyPath)
-    If msg <> "" Then HashFolder = "STOPPED: " & msg: Exit Function
-
-    For Each f In fso.GetFolder(inDir).files
-        If Left$(f.Name, 2) <> "~$" Then
-            Select Case LCase$(fso.GetExtensionName(f.Name))
-                Case "csv", "xlsx", "xlsm", "xls": files.Add f.Name
-                Case Else: skipped = skipped & vbLf & "  " & f.Name
-            End Select
-        End If
-    Next
+    If msg <> "" Then RunHash = "STOPPED: " & msg: Exit Function
+    settingsName = fso.GetFileName(settingsPath)
 
     SetQuiet True
     msg = LoadSettings(settingsPath)
-    If msg <> "" Then Cleanup: HashFolder = "STOPPED: nothing was written. " & msg: Exit Function
+    If msg <> "" Then Cleanup: RunHash = "STOPPED: nothing was written. " & msg: Exit Function
 
     ' Pass 1: read every header; collect names not in hash_columns.xlsx.
     Set newCols = CreateObject("Scripting.Dictionary")
@@ -148,12 +215,12 @@ Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal 
     Next
     If blockers.Count > 0 Then
         Cleanup
-        HashFolder = "STOPPED: nothing was written. These columns have data but no name:" & vbLf & "  " & _
-                     Join(blockers.Keys, vbLf & "  ") & vbLf & vbLf & "Give each a header, or delete it, then run again."
+        RunHash = "STOPPED: nothing was written. These columns have data but no name:" & vbLf & "  " & _
+                  Join(blockers.Keys, vbLf & "  ") & vbLf & vbLf & "Give each a header, or delete it, then run again."
         Exit Function
     End If
 
-    ' Ask about each new name once, and save the answers.
+    ' Ask about each new name once. Answers are saved only when a file is written.
     If newCols.Count > 0 Then
         SetQuiet False
         For Each k In newCols.Keys
@@ -164,29 +231,77 @@ Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal 
             mNames.Add it(0): mActions.Add ans
         Next
         SetQuiet True
-        If addNames.Count > 0 Then SaveAnswers settingsPath, addNames, addActions, addFiles
         If ans = "stop" Then
             Cleanup
-            HashFolder = "STOPPED: nothing was written." & vbLf & addNames.Count & _
-                         " answer(s) given before stopping were saved in " & settingsPath & "."
+            RunHash = "STOPPED: nothing was written, and your answers were not saved."
             Exit Function
         End If
     End If
 
-    ' Pass 2: write the hashed copies.
+    ' Pass 2: confirm, then write the hashed copies.
     If BCryptOpenAlgorithmProvider(mAlg, StrPtr("SHA256"), 0, BCRYPT_ALG_HANDLE_HMAC_FLAG) <> 0 Then
         Err.Raise vbObjectError + 1, , "Could not open the Windows SHA-256 provider."
     End If
-    For Each f In files
-        ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, blockers
-        n = n + 1
-    Next
+
+    If perFile Then
+        For Each f In files
+            prompt = "Write the hashed copy of" & vbLf & "  " & f & vbLf & "to" & vbLf & "  " & outDir & " ?"
+            If fso.FileExists(outDir & "\" & f) Then
+                prompt = prompt & vbLf & vbLf & "A file with this name is already there and will be REPLACED."
+            End If
+            If addNames.Count > 0 And Not answersSaved Then
+                prompt = prompt & vbLf & vbLf & "Your " & addNames.Count & " new column answer(s) will also be saved in " & settingsName & "."
+            End If
+            prompt = prompt & vbLf & vbLf & "OK = write it" & vbLf & "Cancel = skip this file"
+            If Confirm(prompt, testConfirm) Then
+                If addNames.Count > 0 And Not answersSaved Then
+                    SaveAnswers settingsPath, addNames, addActions, addFiles
+                    answersSaved = True
+                End If
+                ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, blockers
+                written = written & vbLf & "  " & f
+                nWritten = nWritten + 1
+            Else
+                declined = declined & vbLf & "  " & f
+            End If
+        Next
+    Else
+        prompt = "Ready to write " & files.Count & " hashed file(s) to" & vbLf & "  " & outDir & vbLf
+        For Each f In files
+            i = i + 1
+            If i <= 15 Then
+                prompt = prompt & vbLf & "  " & f & IIf(fso.FileExists(outDir & "\" & f), "   (REPLACES existing copy)", "   (new)")
+            End If
+        Next
+        If files.Count > 15 Then prompt = prompt & vbLf & "  ... and " & (files.Count - 15) & " more"
+        If addNames.Count > 0 Then
+            prompt = prompt & vbLf & vbLf & "and save " & addNames.Count & " new column answer(s) in " & settingsName & "."
+        End If
+        prompt = prompt & vbLf & vbLf & "OK = write them" & vbLf & "Cancel = stop (nothing is written)"
+        If Confirm(prompt, testConfirm) Then
+            If addNames.Count > 0 Then
+                SaveAnswers settingsPath, addNames, addActions, addFiles
+                answersSaved = True
+            End If
+            For Each f In files
+                ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, blockers
+                written = written & vbLf & "  " & f
+                nWritten = nWritten + 1
+            Next
+        End If
+    End If
     Cleanup
 
-    msg = "Hashed " & n & " file(s) from" & vbLf & "  " & inDir & vbLf & "into" & vbLf & "  " & outDir
-    If addNames.Count > 0 Then msg = msg & vbLf & vbLf & addNames.Count & " new column name(s) saved in " & settingsPath & "."
+    If nWritten = 0 Then
+        msg = "STOPPED: nothing was written."
+        If addNames.Count > 0 Then msg = msg & " Your answers to the new-column questions were not saved."
+    Else
+        msg = "Wrote hashed copies to" & vbLf & "  " & outDir & ":" & written
+        If declined <> "" Then msg = msg & vbLf & vbLf & "Not written (you chose Cancel):" & declined
+        If answersSaved Then msg = msg & vbLf & vbLf & addNames.Count & " new column answer(s) saved in " & settingsPath & "."
+    End If
     If skipped <> "" Then msg = msg & vbLf & vbLf & "Skipped (not csv/xlsx/xls), not copied:" & skipped
-    HashFolder = msg
+    RunHash = msg
     Exit Function
 
 Fail:
@@ -194,8 +309,16 @@ Fail:
     On Error Resume Next
     If Not mOpenWb Is Nothing Then mOpenWb.Close SaveChanges:=False
     Cleanup
-    HashFolder = "STOPPED on error: " & msg & vbLf & _
-                 "Files in the output folder may be incomplete. Fix the problem and run again."
+    RunHash = "STOPPED on error: " & msg & vbLf & _
+              "Files in the output folder may be incomplete. Fix the problem and run again."
+End Function
+
+' OK/Cancel dialog; Cancel is the default button.
+Private Function Confirm(ByVal prompt As String, ByVal testConfirm As String) As Boolean
+    If testConfirm <> "" Then Confirm = (LCase$(testConfirm) = "yes"): Exit Function
+    SetQuiet False
+    Confirm = (MsgBox(prompt, vbOKCancel + vbQuestion + vbDefaultButton2, "Confirm") = vbOK)
+    SetQuiet True
 End Function
 
 Private Sub Cleanup()
@@ -331,7 +454,7 @@ Private Function AskColumn(ByVal h As String, ByVal fname As String, ByVal sampl
              "Example values:" & vbLf & samples & vbLf & _
              "Could this column identify a student (name, ID, email, username, free-text answer)?" & vbLf & vbLf & _
              "Yes  = HASH it" & vbLf & "No   = KEEP it unchanged" & vbLf & "Cancel = stop (nothing is written)" & vbLf & vbLf & _
-             "Your answer is saved in hash_columns.xlsx, so you won't be asked about this name again."
+             "Your answer is saved in hash_columns.xlsx when a file is written, so you won't be asked about this name again."
     Select Case MsgBox(prompt, vbYesNoCancel + vbQuestion + vbDefaultButton1, "New column")
         Case vbYes: AskColumn = "hash"
         Case vbNo: AskColumn = "keep"

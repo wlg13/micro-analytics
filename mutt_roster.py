@@ -5,7 +5,8 @@ Usage in .muttrc:
     set display_filter="/path/to/mutt_roster.py"
     unignore x-roster
 
-Roster CSV: first argument, else $MUTT_ROSTER, else $MA/outputs/merged_roster.csv.
+Roster CSV: first argument, else $MUTT_ROSTER, else $MA/outputs/merged_roster.csv
+($MA/outputs-dev/merged_roster.csv when MA_MODE=dev, as in ma_paths.R).
 """
 import csv
 import os
@@ -19,7 +20,8 @@ def roster_path():
         return sys.argv[1]
     if os.environ.get("MUTT_ROSTER"):
         return os.environ["MUTT_ROSTER"]
-    return os.path.join(os.environ.get("MA", ""), "outputs", "merged_roster.csv")
+    outputs = "outputs-dev" if os.environ.get("MA_MODE", "").strip().lower() == "dev" else "outputs"
+    return os.path.join(os.environ.get("MA", ""), outputs, "merged_roster.csv")
 
 
 def find_student(address):

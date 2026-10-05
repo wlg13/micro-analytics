@@ -3,11 +3,10 @@
 library(tidyverse)
 library(readxl)
 
-ma_dir <- Sys.getenv("MA")
-if (ma_dir == "") stop("Environment variable MA is not set (should point to the data directory).")
-
-inputs_dir <- file.path(ma_dir, "inputs")
-outputs_dir <- file.path(ma_dir, "outputs")
+source("ma_paths.R")
+dirs <- ma_dirs()
+inputs_dir <- dirs$inputs
+outputs_dir <- dirs$outputs
 
 roster_details_path <- file.path(inputs_dir, "roster_Activity_Insights.xlsx")
 lionpath_path <- file.path(inputs_dir, "roster_LionPATH.xlsx")
@@ -43,8 +42,6 @@ message("Survey: ", nrow(survey), " rows (", n_no_survey, " roster students with
 
 merged_roster <- merged_roster %>%
   select(`First Name`, `Last Name`, ID, Email, Level, FirstGen = `First Generation`, `Program and Plan`)
-
-if (!dir.exists(outputs_dir)) dir.create(outputs_dir, recursive = TRUE)
 
 output_path <- file.path(outputs_dir, "merged_roster.csv")
 write_csv(merged_roster, output_path)

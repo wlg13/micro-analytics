@@ -1,3 +1,168 @@
+10/7/2026
+RUNNING THE HASH EXCEL MACRO
+Put file to be hashed into 104/104 Database -- Micro-analytics/inputs (not sure have to, but think a good idea)
+Alt-F8 and select Hash1_HashFileOrFiles
+1. Look at the NEW rows in hash_columns.xlsx (in the parent directory of the above. 
+The macro opened the file and jumped to the first NEW row. The new rows are at the bottom, and their 
+Check column (D) starts with "NEW". Each row has:
+- A: Column name, the header from your file. For survey questions, this includes the question text.
+- B: Action, the macro's suggestion, hash or keep.
+- C: First seen in, which file the column came from.
+- D: Check, which says why it suggested that, for example "NEW - suggested hash: written answers, may identify k
+     students (48 answers, 46 different, average 62 characters)".
+2. For each NEW row, decide and set column B.
+- hash if the column could identify a student: names, IDs, emails, usernames, or written answers.
+- keep if it's safe: multiple choice, ratings, scores, dates.
+If the suggestion is right, leave B as it is.
+3. Clear the NEW text in column D. Select the Check cells of the rows you've reviewed and press Delete; you can select many at once. The macro treats a row as reviewed only once the NEW is gone. This step is deliberate, so nothing gets copied to inputs-dev without you having looked at it.
+4. Save hash_columns.xlsx.
+5. Run HashFileToDev again and pick the same file. This time it shouldn't find anything new. It will ask "Write the hashed copy of … to inputs-dev?"; click OK, and the file appears in inputs-dev.
+Tips
+- Many rows: turn on Excel's filter (Data > Filter) and filter column D to show only rows starting with "NEW".
+- Repeating patterns: if many columns share a pattern you'd always keep, you can add one wildcard row instead, as covered above. 
+  For example, # covers points columns. You still clear NEW on the rows that were added.
+- Later runs: you're asked only about column names the macro hasn't seen before. A new survey brings new question numbers, so 
+  expect a short review each time.
+
+
+10/6/2026
+SETTING MA_MODE (dev runs only; unset = production)
+Inside R / Positron console
+  Dev on:          Sys.setenv(MA_MODE = "dev")
+  Back to prod:    Sys.unsetenv("MA_MODE")
+Bash
+  Dev on:          MA_MODE=dev Rscript merge_rosters.R   (that one command only)
+  Back to prod:    just leave it off
+PowerShell
+  Dev on:          $env:MA_MODE = "dev"
+  Back to prod:    Remove-Item Env:MA_MODE
+Do NOT put MA_MODE in .Renviron -- every R session, including
+production, would then use the dev folders.
+
+10/5/2026
+DEV vs PRODUCTION SETUP (added 2026-10-05)
+==========================================
+
+THE SWITCH: MA_MODE (an environment variable)
+  R scripts get their folders from ma_paths.R (function ma_dirs()).
+  - MA_MODE not set (default) = PRODUCTION:  inputs\  -> outputs\
+  - MA_MODE=dev               = DEV:         inputs-dev\ -> outputs-dev\
+  - Anything else = error, script stops.
+  Every run prints a first line like:  Mode: production (inputs -> outputs)
+  mutt_roster.py follows the same switch.
+  I (production) do nothing different -- just don't set MA_MODE.
+  Claude always runs with MA_MODE=dev.
+  New R scripts should use:  source("ma_paths.R"); dirs <- ma_dirs()
+
+DENY RULES (Claude Code, in ~/.claude/settings.json)
+  Claude's file tools are blocked from:
+  - hash_key.txt
+  - everything in the real inputs\ and outputs\ folders
+  Shell commands that mention hash_key.txt are also blocked.
+  inputs-dev\, outputs-dev\ and hash_columns.xlsx stay open to Claude.
+  Limit: rules can't stop an R/Python script from reading real files --
+  that's what MA_MODE=dev is for. Together they cover both routes.
+
+WORKFLOW
+  1. New/updated file in inputs\  ->  Excel: Alt+F8 -> HashFileToDev
+  2. Claude develops and tests on inputs-dev\ (MA_MODE=dev).
+  3. I run production (no MA_MODE) on the real dat
+
+
+HASHING MACROS (hash_inputs.bas) -- how to use
+==============================================
+
+PURPOSE
+  Make de-identified copies of the files in "inputs" so Claude can develop
+  code without seeing student data. Identifying columns (IDs, emails,
+  names, ...) are replaced by a keyed hash; everything else is unchanged.
+  The same value always gets the same hash, so joins still work.
+
+FOLDERS  (104 Database -- Micro-analytics\)
+  inputs\          real data. Macros only READ these; never changed.
+  inputs-dev\      hashed copies, written by the macros. Claude works here.
+  outputs\         production output (I run this).
+  outputs-dev\     dev output (Claude).
+  hash_key.txt     secret key. Never share, commit, or copy into inputs-dev.
+                   Never replace it (that changes every hash).
+  hash_columns.xlsx  list of column names, each marked "hash" or "keep".
+
+WHERE THE MACROS LIVE
+  Imported into PERSONAL.XLSB, so they're available whenever Excel is open
+  on this computer. Run them with Alt+F8.
+
+THE MACROS
+  MakeHashKey      Run ONCE (already done). Creates hash_key.txt. Refuses
+                   to overwrite an existing key.
+
+  HashFileToDev    Normal use, whenever I add or update a file in inputs.
+                   1. Pick the file(s) in inputs (Ctrl+click for several).
+                   2. For any NEW column name it shows example values and asks:
+                        Yes = HASH (could identify a student: name, ID,
+                              email, username, free-text answer)
+                        No  = KEEP unchanged
+                        Cancel = stop, nothing written
+                   3. For each file it asks before writing to inputs-dev
+                      (and says if it will REPLACE an existing copy).
+                      OK = write, Cancel = skip that file.
+
+  HashInputsToDev  Redo ALL files in inputs, e.g. after changing an
+                   answer in hash_columns.xlsx. Shows the full list
+                   (new / replaces) and asks once before writing.
+
+HASH_COLUMNS.XLSX
+  - My answers are saved here only when a file is actually written, so
+    I'm asked about each column name only once.
+  - I can edit it directly: column name + "hash" or "keep".
+    Names ignore case; * is a wildcard (e.g. "Quiz *").
+  - After changing an answer, run HashInputsToDev to redo the copies.
+
+WHEN THE MACRO CODE CHANGES (Claude updates hash_inputs.bas)
+  1. Merge the change into main (git).
+  2. Excel: Alt+F11 -> under VBAProject (PERSONAL.XLSB) right-click
+     HashInputs -> Remove (No to export).
+  3. File > Import File -> hash_inputs.bas from the project folder -> Save.
+  4. Alt+F8 to confirm the macros are there.
+  Excel keeps its own copy, so changes to the .bas file do nothing until
+  re-imported.
+
+IF SOMETHING GOES WRONG
+  - "STOPPED" messages mean nothing (or not everything) was written; the
+    message says why. Fix and run again.
+  - Files in inputs are never changed, so a failed run is always safe to
+    repeat.
+  - A file open in Excel can block a run; close it and retry.
+
+9/28/2026
+Don't forget in ~Positron_work_space/micro-analytics
+The Claude agent was still running, so use "claude agents" to attach to it. 
+Using Opus 5.5
+Issues for me: synthetic data branch it worked on -- delete, restrict files and folders Claude can access
+  run "/permissions" in Claude
+model: separate -dev and production folders. I hash student data with a macro Claude wrote for the inputs-dev folder.
+The hash macro for Excel is said to be done: "result: The Excel macro (branch hash-inputs-macro, commit 7c971c2, pushed) 
+  now asks about new column names and saves your hash/keep answers in hash_columns.xlsx; it passed all tests on fake data 
+  and is ready for you to import and run." I have yet to import into Excel and try it. It says, "Import the macro into Excel, 
+  run MakeHashKey, then run HashInputsToDev on the real data." Once working, I can dump in all the files I want it to read 
+  for the whole database project. Yeah!
+It has unresolved issues:
+  - the dev/production switch in the R scripts
+  - the deny rules for the key and the real folders [see above with /permissions]
+  - merging this branch and the Section branch into main
+To resume: 
+  - In a terminal, from the project folder, run claude --resume and pick this session from the list. 
+    claude --continue reopens the most recent session in that folder.
+  - Inside Claude Code, type /resume.
+Maybe switch to Sonnet 5.5? 
+  See https://techcrunch.com/2026/09/28/anthropic-releases-sonnet-5-5-which-it-calls-a-significantly-cheaper-faster-work-partner/
+  "Anthropic’s benchmarks show Sonnet 5.5 performing better than Opus 5.5 on agentic coding, likely because of its ability to 
+  spawn multiple agents without exceeding cost limits."
+  Also: https://www.anthropic.com/claude-sonnet-5-5?utm_source=tldrai (takes time to load)
+
+9/21/2026
+Claude's memory of this project: C:\Users\billg\.claude\projects\C--Users-billg-Positron-work-space-micro-analytics\memory\ .
+For next time, from this folder, use claude --continue (and it seems that the above will work)
+
 9/14/2026
 file.edit("~/.Renvviron") then put in
 MA=C:/Users/billg/OneDrive - The Pennsylvania State University/104/104 Database -- Micro-analytics/
@@ -9,6 +174,10 @@ https://support.claude.com/en/articles/14552382-your-first-day-in-claude-code
 next time for Claude Code
 claude --resume 7422b8d4-0419-4555-89c1-1648d79d6d16
 
-9/21/2026
-Claude's memory of this project: C:\Users\billg\.claude\projects\C--Users-billg-Positron-work-space-micro-analytics\memory\ .
-For next time, from this folder, use claude --continue (and it seems that the above will work)
+
+
+
+
+  
+
+

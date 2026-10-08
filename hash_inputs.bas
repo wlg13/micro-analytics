@@ -14,7 +14,7 @@ Attribute VB_Name = "HashInputs"
 '   2. Run Hash3_MakeKey_OnceOnly. It creates hash_key.txt in BASE_DIR.
 '      Never share it, commit it, or copy it into inputs-dev.
 ' Macros (Alt+F8):
-'   Hash1_HashFiles         Pick file(s) in inputs\ and hash them into
+'   Hash1_HashFileOrFiles   Pick file(s) in inputs\ and hash them into
 '                           inputs-dev\; asks before writing each one. Use it
 '                           for new or updated files, and again after changing
 '                           an answer in hash_columns.xlsx (Ctrl+A in the
@@ -45,7 +45,7 @@ Attribute VB_Name = "HashInputs"
 
 Option Explicit
 
-Private Const MACRO_VERSION As String = "2026-10-08"
+Private Const MACRO_VERSION As String = "2026-10-08b"
 Private Const BASE_DIR As String = "C:\Users\billg\OneDrive - The Pennsylvania State University\104\104 Database -- Micro-analytics"
 Private Const KEY_FILE As String = "hash_key.txt"
 Private Const SETTINGS_FILE As String = "hash_columns.xlsx"
@@ -99,7 +99,7 @@ End Function
 ' ---- Macros to run ----
 
 ' Hash one or more files you pick in inputs\, asking before each is written.
-Public Sub Hash1_HashFiles()
+Public Sub Hash1_HashFileOrFiles()
     Dim fso As Object, inDir As String, p As Variant, list As String, msg As String
     Set fso = CreateObject("Scripting.FileSystemObject")
     inDir = fso.GetAbsolutePathName(BASE_DIR & "\inputs")

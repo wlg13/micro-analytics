@@ -25,6 +25,6 @@ desktop.ini
 
 # Possible student data
 *.csv
-*.xlxs
+*.xlsx
 *.xls
 *.tsv

@@ -11,13 +11,16 @@ Attribute VB_Name = "HashInputs"
 '   1. In Excel press Alt+F11, then File > Import File... and pick this file.
 '      (Import it into your Personal Macro Workbook or an .xlsm kept outside
 '      the inputs folders.)
-'   2. Run MakeHashKey. It creates hash_key.txt in BASE_DIR. Never share it,
-'      commit it, or copy it into inputs-dev.
-' Each time you add or update a file in inputs\:
-'   Run HashFileToDev and pick the file(s). It asks before writing each one.
-' To redo every file (e.g. after changing an answer in hash_columns.xlsx):
-'   Run HashInputsToDev. It lists all the files and asks once before writing.
-' HashMacroVersion shows which version of this file Excel has.
+'   2. Run Hash3_MakeKey_OnceOnly. It creates hash_key.txt in BASE_DIR.
+'      Never share it, commit it, or copy it into inputs-dev.
+' Macros (Alt+F8):
+'   Hash1_HashFiles         Pick file(s) in inputs\ and hash them into
+'                           inputs-dev\; asks before writing each one. Use it
+'                           for new or updated files, and again after changing
+'                           an answer in hash_columns.xlsx (Ctrl+A in the
+'                           picker selects every file).
+'   Hash2_Version           Shows which version of this file Excel has.
+'   Hash3_MakeKey_OnceOnly  Creates the key (done once; never replaces it).
 '
 ' Column names:
 '   hash_columns.xlsx (in BASE_DIR) lists every column name the macro knows,
@@ -42,7 +45,7 @@ Attribute VB_Name = "HashInputs"
 
 Option Explicit
 
-Private Const MACRO_VERSION As String = "2026-10-07"
+Private Const MACRO_VERSION As String = "2026-10-08"
 Private Const BASE_DIR As String = "C:\Users\billg\OneDrive - The Pennsylvania State University\104\104 Database -- Micro-analytics"
 Private Const KEY_FILE As String = "hash_key.txt"
 Private Const SETTINGS_FILE As String = "hash_columns.xlsx"
@@ -96,7 +99,7 @@ End Function
 ' ---- Macros to run ----
 
 ' Hash one or more files you pick in inputs\, asking before each is written.
-Public Sub HashFileToDev()
+Public Sub Hash1_HashFiles()
     Dim fso As Object, inDir As String, p As Variant, list As String, msg As String
     Set fso = CreateObject("Scripting.FileSystemObject")
     inDir = fso.GetAbsolutePathName(BASE_DIR & "\inputs")
@@ -121,15 +124,7 @@ Public Sub HashFileToDev()
     MsgBox msg, IIf(Left$(msg, 7) = "STOPPED", vbExclamation, vbInformation), "Hash file"
 End Sub
 
-' Hash every file in inputs\, after one confirmation listing what will be written.
-Public Sub HashInputsToDev()
-    Dim msg As String
-    msg = HashFolder(BASE_DIR & "\inputs", BASE_DIR & "\inputs-dev", BASE_DIR & "\" & KEY_FILE, _
-                     BASE_DIR & "\" & SETTINGS_FILE)
-    MsgBox msg, IIf(Left$(msg, 7) = "STOPPED", vbExclamation, vbInformation), "Hash inputs"
-End Sub
-
-Public Sub MakeHashKey()
+Public Sub Hash3_MakeKey_OnceOnly()
     Dim path As String, b(0 To 31) As Byte, f As Integer
     path = BASE_DIR & "\" & KEY_FILE
     If Len(Dir$(path)) > 0 Then
@@ -149,30 +144,16 @@ Public Sub MakeHashKey()
            "Keep it private: never share it, commit it, or copy it into inputs-dev.", vbInformation, "Hash key"
 End Sub
 
-Public Sub HashMacroVersion()
+Public Sub Hash2_Version()
     MsgBox "hash_inputs.bas version " & MACRO_VERSION, vbInformation, "Hash macros"
 End Sub
 
 ' ---- Core (public so it can be tested on other folders) ----
 
-' Both return a summary that starts with "STOPPED" if nothing was written to
+' Returns a summary that starts with "STOPPED" if nothing was written to
 ' the output folder. testConfirm is for automated tests only: "yes" or "no"
 ' answers every confirmation without showing a dialog, and the column list
 ' is not opened for review.
-
-' Every csv/xlsx/xls file in inDir, with one confirmation for all of them.
-Public Function HashFolder(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
-                           ByVal settingsPath As String, Optional ByVal testConfirm As String = "") As String
-    Dim fso As Object, files As New Collection, f As Variant, skipped As String
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    If Not fso.FolderExists(inDir) Then HashFolder = "STOPPED: input folder not found: " & inDir: Exit Function
-    For Each f In fso.GetFolder(inDir).files
-        If Left$(f.Name, 2) <> "~$" Then
-            If IsDataFile(f.Name) Then files.Add f.Name Else skipped = skipped & vbLf & "  " & f.Name
-        End If
-    Next
-    HashFolder = RunHash(inDir, outDir, keyPath, settingsPath, files, skipped, False, testConfirm)
-End Function
 
 ' The files named in fileList (names in inDir separated by "|"), with one
 ' confirmation per file.
@@ -191,7 +172,7 @@ Public Function HashFileList(ByVal inDir As String, ByVal outDir As String, ByVa
         files.Add CStr(f)
     Next
     If files.Count = 0 Then HashFileList = "STOPPED: no file was picked.": Exit Function
-    HashFileList = RunHash(inDir, outDir, keyPath, settingsPath, files, "", True, testConfirm)
+    HashFileList = RunHash(inDir, outDir, keyPath, settingsPath, files, testConfirm)
 End Function
 
 Private Function IsDataFile(ByVal nm As String) As Boolean
@@ -201,8 +182,7 @@ Private Function IsDataFile(ByVal nm As String) As Boolean
 End Function
 
 Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
-                         ByVal settingsPath As String, files As Collection, ByVal skipped As String, _
-                         ByVal perFile As Boolean, ByVal testConfirm As String) As String
+                         ByVal settingsPath As String, files As Collection, ByVal testConfirm As String) As String
     Dim fso As Object, newCols As Object, pending As Object, blockers As Object
     Dim f As Variant, k As Variant, it As Variant, prompt As String, settingsName As String, review As String
     Dim msg As String, written As String, declined As String, nWritten As Long, i As Long
@@ -214,7 +194,7 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
     inDir = fso.GetAbsolutePathName(inDir)
     outDir = fso.GetAbsolutePathName(outDir)
     If StrComp(inDir, outDir, vbTextCompare) = 0 Then RunHash = "STOPPED: input and output folders are the same.": Exit Function
-    If Not fso.FileExists(keyPath) Then RunHash = "STOPPED: no key file at " & keyPath & ". Run MakeHashKey first.": Exit Function
+    If Not fso.FileExists(keyPath) Then RunHash = "STOPPED: no key file at " & keyPath & ". Run Hash3_MakeKey_OnceOnly first.": Exit Function
     msg = LoadKey(keyPath)
     If msg <> "" Then RunHash = "STOPPED: " & msg: Exit Function
     settingsName = fso.GetFileName(settingsPath)
@@ -277,40 +257,20 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
         Err.Raise vbObjectError + 1, , "Could not open the Windows SHA-256 provider."
     End If
 
-    If perFile Then
-        For Each f In files
-            prompt = "Write the hashed copy of" & vbLf & "  " & f & vbLf & "to" & vbLf & "  " & outDir & " ?"
-            If fso.FileExists(outDir & "\" & f) Then
-                prompt = prompt & vbLf & vbLf & "A file with this name is already there and will be REPLACED."
-            End If
-            prompt = prompt & vbLf & vbLf & "OK = write it" & vbLf & "Cancel = skip this file"
-            If Confirm(prompt, testConfirm) Then
-                ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, pending, blockers
-                written = written & vbLf & "  " & f
-                nWritten = nWritten + 1
-            Else
-                declined = declined & vbLf & "  " & f
-            End If
-        Next
-    Else
-        prompt = "Ready to write " & files.Count & " hashed file(s) to" & vbLf & "  " & outDir & vbLf
-        i = 0
-        For Each f In files
-            i = i + 1
-            If i <= 15 Then
-                prompt = prompt & vbLf & "  " & f & IIf(fso.FileExists(outDir & "\" & f), "   (REPLACES existing copy)", "   (new)")
-            End If
-        Next
-        If files.Count > 15 Then prompt = prompt & vbLf & "  ... and " & (files.Count - 15) & " more"
-        prompt = prompt & vbLf & vbLf & "OK = write them" & vbLf & "Cancel = stop (nothing is written)"
-        If Confirm(prompt, testConfirm) Then
-            For Each f In files
-                ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, pending, blockers
-                written = written & vbLf & "  " & f
-                nWritten = nWritten + 1
-            Next
+    For Each f In files
+        prompt = "Write the hashed copy of" & vbLf & "  " & f & vbLf & "to" & vbLf & "  " & outDir & " ?"
+        If fso.FileExists(outDir & "\" & f) Then
+            prompt = prompt & vbLf & vbLf & "A file with this name is already there and will be REPLACED."
         End If
-    End If
+        prompt = prompt & vbLf & vbLf & "OK = write it" & vbLf & "Cancel = skip this file"
+        If Confirm(prompt, testConfirm) Then
+            ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, pending, blockers
+            written = written & vbLf & "  " & f
+            nWritten = nWritten + 1
+        Else
+            declined = declined & vbLf & "  " & f
+        End If
+    Next
     Cleanup
 
     If nWritten = 0 Then
@@ -319,7 +279,6 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
         msg = "Wrote hashed copies to" & vbLf & "  " & outDir & ":" & written
         If declined <> "" Then msg = msg & vbLf & vbLf & "Not written (you chose Cancel):" & declined
     End If
-    If skipped <> "" Then msg = msg & vbLf & vbLf & "Skipped (not csv/xlsx/xls), not copied:" & skipped
     RunHash = msg
     Exit Function
 

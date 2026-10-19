@@ -41,7 +41,7 @@ n_no_survey <- sum(!tolower(merged_roster$Email) %in% survey$email_key)
 message("Survey: ", nrow(survey), " rows (", n_no_survey, " roster students with no survey submission)")
 
 merged_roster <- merged_roster %>%
-  select(`First Name`, `Last Name`, ID, Email, Level, FirstGen = `First Generation`, `Program and Plan`)
+  select(`First Name`, `Last Name`, ID, Email, Section, Level, FirstGen = `First Generation`, `Program and Plan`)
 
 output_path <- file.path(outputs_dir, "merged_roster.csv")
 write_csv(merged_roster, output_path)

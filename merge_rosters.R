@@ -8,8 +8,8 @@ dirs <- ma_dirs()
 inputs_dir <- dirs$inputs
 outputs_dir <- dirs$outputs
 
-roster_details_path <- file.path(inputs_dir, "roster_Activity_Insights.xlsx")
-lionpath_path <- file.path(inputs_dir, "roster_LionPATH.xlsx")
+roster_details_path <- file.path(inputs_dir, "rosters", "roster_Activity_Insights.xlsx")
+lionpath_path <- file.path(inputs_dir, "rosters", "roster_LionPATH.xlsx")
 
 roster_details <- read_excel(roster_details_path) %>%
   mutate(`PSU ID` = as.character(`PSU ID`)) %>%
@@ -26,7 +26,7 @@ merged_roster <- left_join(lionpath, roster_details, by = c("ID" = "PSU ID"))
 n_unmatched <- sum(is.na(merged_roster$Email))
 message("Merged roster: ", nrow(merged_roster), " rows (", n_unmatched, " with no match in roster_Activity_Insights.xlsx)")
 
-survey_path <- file.path(inputs_dir, "Initial Survey Survey Student Analysis Report.csv")
+survey_path <- file.path(inputs_dir, "surveys", "Initial Survey Survey Student Analysis Report.csv")
 survey <- read_csv(survey_path, col_select = c(sis_id, starts_with("100874763")), col_types = cols(.default = "c")) %>%
   rename(`First Generation` = starts_with("100874763")) %>%
   mutate(email_key = tolower(sis_id)) %>%

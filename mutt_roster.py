@@ -5,11 +5,14 @@ Usage in .muttrc:
     set display_filter="/path/to/mutt_roster.py"
     unignore x-roster
 
-Roster CSV: first argument, else $MUTT_ROSTER, else $MA/outputs/merged_roster.csv
-($MA/outputs-dev/merged_roster.csv when MA_MODE=dev, as in ma_paths.R).
+Roster CSV: first argument, else $MUTT_ROSTER, else
+$MA/<term>/outputs/merged_roster.csv ($MA/dev/<term>/outputs/... when
+MA_MODE=dev), with <term> chosen as in ma_paths.R: $MA_TERM, else the only
+term folder present.
 """
 import csv
 import os
+import re
 import sys
 from email import message_from_bytes, policy
 from email.utils import parseaddr
@@ -20,8 +23,17 @@ def roster_path():
         return sys.argv[1]
     if os.environ.get("MUTT_ROSTER"):
         return os.environ["MUTT_ROSTER"]
-    outputs = "outputs-dev" if os.environ.get("MA_MODE", "").strip().lower() == "dev" else "outputs"
-    return os.path.join(os.environ.get("MA", ""), outputs, "merged_roster.csv")
+    base = os.environ.get("MA", "")
+    if os.environ.get("MA_MODE", "").strip().lower() == "dev":
+        base = os.path.join(base, "dev")
+    term = os.environ.get("MA_TERM", "").strip()
+    if not term:
+        terms = [d for d in os.listdir(base)
+                 if re.fullmatch(r"(Fa|Sp|Su)[0-9]{2}", d) and os.path.isdir(os.path.join(base, d))]
+        if len(terms) != 1:
+            raise RuntimeError("set MA_TERM: term folders found: " + ", ".join(sorted(terms)))
+        term = terms[0]
+    return os.path.join(base, term, "outputs", "merged_roster.csv")
 
 
 def find_student(address):

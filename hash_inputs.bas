@@ -1,9 +1,17 @@
 Attribute VB_Name = "HashInputs"
-' Make a de-identified copy of files in inputs\ in inputs-dev\.
+' Make de-identified copies of input files for development.
+'
+' Folders (BASE_DIR = the Micro-Analytics folder):
+'   BASE_DIR\<term>\...       real input files, one folder per term (Fa26,
+'                              Sp27, Su27, ...), organized in subfolders.
+'   BASE_DIR\dev\<term>\...   hashed copies, same subfolders and file names.
+'   BASE_DIR\<term>\outputs   results; never hashed.
+' A file picked at BASE_DIR\Fa26\a\b\x.csv is written to BASE_DIR\dev\Fa26\a\b\x.csv;
+' missing folders under dev\ are created.
 '
 ' Columns marked "hash" in hash_columns.xlsx (IDs, emails, names, ...) are
 ' replaced by a keyed hash (HMAC-SHA256, first 16 hex characters). Every
-' other cell is copied unchanged, so inputs-dev has the same files, sheets,
+' other cell is copied unchanged, so the dev copy has the same files, sheets,
 ' column headers and column types as inputs. The same value always gets the
 ' same hash, so joins on ID or email still work on the hashed files.
 '
@@ -12,10 +20,11 @@ Attribute VB_Name = "HashInputs"
 '      (Import it into your Personal Macro Workbook or an .xlsm kept outside
 '      the inputs folders.)
 '   2. Run Hash3_MakeKey_OnceOnly. It creates hash_key.txt in BASE_DIR.
-'      Never share it, commit it, or copy it into inputs-dev.
+'      Never share it, commit it, or copy it into dev.
 ' Macros (Alt+F8):
-'   Hash1_HashFileOrFiles   Pick file(s) in inputs\ and hash them into
-'                           inputs-dev\; asks before writing each one. Use it
+'   Hash1_HashFileOrFiles   Pick file(s) in a term folder and hash them into
+'                           the same place under dev\; asks before writing
+'                           each one. Use it
 '                           for new or updated files, and again after changing
 '                           an answer in hash_columns.xlsx (Ctrl+A in the
 '                           picker selects every file).
@@ -29,14 +38,14 @@ Attribute VB_Name = "HashInputs"
 '   to hash_columns.xlsx with a suggested Action and "NEW - ..." in the
 '   Check column, saying why (counts only, never student answers), opens
 '   the file and stops. Check each NEW row, change Action if needed, delete
-'   the NEW text, save, and run again. Nothing is written to inputs-dev
+'   the NEW text, save, and run again. Nothing is written to dev
 '   while any column of the picked files is still marked NEW.
 '   In names, case is ignored, * matches any characters and # one digit
 '   (e.g. "Quiz *", or "#" and "##" for Canvas points columns "1", "12").
 '
 ' Safety:
-'   - Files in inputs\ are opened read-only and never saved.
-'   - Nothing is written to inputs-dev until every column is reviewed and
+'   - Input files are opened read-only and never saved or renamed.
+'   - Nothing is written to dev until every column is reviewed and
 '     you click OK.
 '   - CSV files are processed as text, not opened in Excel, so leading
 '     zeros, long numbers and dates in the other columns are not changed.
@@ -45,8 +54,9 @@ Attribute VB_Name = "HashInputs"
 
 Option Explicit
 
-Private Const MACRO_VERSION As String = "2026-10-08b"
-Private Const BASE_DIR As String = "C:\Users\billg\OneDrive - The Pennsylvania State University\104\104 Database -- Micro-analytics"
+Private Const MACRO_VERSION As String = "2026-10-19"
+Private Const BASE_DIR As String = "C:\Users\billg\OneDrive - The Pennsylvania State University\Micro-Analytics"
+Private Const DEV_FOLDER As String = "dev"
 Private Const KEY_FILE As String = "hash_key.txt"
 Private Const SETTINGS_FILE As String = "hash_columns.xlsx"
 Private Const HASH_HEX_CHARS As Long = 16
@@ -98,28 +108,28 @@ End Function
 
 ' ---- Macros to run ----
 
-' Hash one or more files you pick in inputs\, asking before each is written.
+' Hash one or more files you pick in a term folder, asking before each is written.
 Public Sub Hash1_HashFileOrFiles()
-    Dim fso As Object, inDir As String, p As Variant, list As String, msg As String
+    Dim fso As Object, baseDir As String, p As Variant, list As String, msg As String
     Set fso = CreateObject("Scripting.FileSystemObject")
-    inDir = fso.GetAbsolutePathName(BASE_DIR & "\inputs")
+    baseDir = fso.GetAbsolutePathName(BASE_DIR)
     With Application.FileDialog(msoFileDialogFilePicker)
-        .Title = "Pick the file(s) in inputs to hash into inputs-dev"
-        .InitialFileName = inDir & "\"
+        .Title = "Pick the file(s) in a term folder (e.g. Fa26) to hash into dev"
+        .InitialFileName = baseDir & "\"
         .AllowMultiSelect = True
         .Filters.Clear
         .Filters.Add "Data files", "*.csv; *.xlsx; *.xlsm; *.xls"
         If .Show <> -1 Then Exit Sub
         For Each p In .SelectedItems
-            If StrComp(fso.GetParentFolderName(p), inDir, vbTextCompare) <> 0 Then
-                MsgBox "Only files directly in" & vbLf & "  " & inDir & vbLf & "can be hashed. Nothing was written.", _
+            If StrComp(Left$(p, Len(baseDir) + 1), baseDir & "\", vbTextCompare) <> 0 Then
+                MsgBox "Only files inside" & vbLf & "  " & baseDir & vbLf & "can be hashed. Nothing was written.", _
                        vbExclamation, "Hash file"
                 Exit Sub
             End If
-            list = list & "|" & fso.GetFileName(p)
+            list = list & "|" & Mid$(p, Len(baseDir) + 2)
         Next
     End With
-    msg = HashFileList(inDir, BASE_DIR & "\inputs-dev", BASE_DIR & "\" & KEY_FILE, _
+    msg = HashFileList(baseDir, baseDir & "\" & DEV_FOLDER, BASE_DIR & "\" & KEY_FILE, _
                        BASE_DIR & "\" & SETTINGS_FILE, Mid$(list, 2))
     MsgBox msg, IIf(Left$(msg, 7) = "STOPPED", vbExclamation, vbInformation), "Hash file"
 End Sub
@@ -141,7 +151,7 @@ Public Sub Hash3_MakeKey_OnceOnly()
     Print #f, BytesToHex(b, 32)
     Close #f
     MsgBox "Created " & path & vbLf & vbLf & _
-           "Keep it private: never share it, commit it, or copy it into inputs-dev.", vbInformation, "Hash key"
+           "Keep it private: never share it, commit it, or copy it into dev.", vbInformation, "Hash key"
 End Sub
 
 Public Sub Hash2_Version()
@@ -155,8 +165,10 @@ End Sub
 ' answers every confirmation without showing a dialog, and the column list
 ' is not opened for review.
 
-' The files named in fileList (names in inDir separated by "|"), with one
-' confirmation per file.
+' The files named in fileList (paths relative to inDir, separated by "|"),
+' with one confirmation per file. Each must be inside a term folder (Fa26,
+' Sp27, Su27, ...), not in its outputs folder; the copy goes to the same
+' relative path under outDir.
 Public Function HashFileList(ByVal inDir As String, ByVal outDir As String, ByVal keyPath As String, _
                              ByVal settingsPath As String, ByVal fileList As String, _
                              Optional ByVal testConfirm As String = "") As String
@@ -169,11 +181,35 @@ Public Function HashFileList(ByVal inDir As String, ByVal outDir As String, ByVa
         If Not IsDataFile(f) Then
             HashFileList = "STOPPED: nothing was written. Not a csv/xlsx/xls file: " & f: Exit Function
         End If
+        If Not InTermFolder(f) Then
+            HashFileList = "STOPPED: nothing was written. Only files inside a term folder (Fa26, Sp27, Su27, ...) " & _
+                           "can be hashed, not in dev or outputs: " & f: Exit Function
+        End If
         files.Add CStr(f)
     Next
     If files.Count = 0 Then HashFileList = "STOPPED: no file was picked.": Exit Function
     HashFileList = RunHash(inDir, outDir, keyPath, settingsPath, files, testConfirm)
 End Function
+
+' True if rel (a path relative to BASE_DIR) starts with a term folder such as
+' Fa26 and is not in that term's outputs folder.
+Private Function InTermFolder(ByVal rel As String) As Boolean
+    Dim parts As Variant
+    parts = Split(rel, "\")
+    If UBound(parts) < 1 Then Exit Function
+    If Not (parts(0) Like "Fa##" Or parts(0) Like "Sp##" Or parts(0) Like "Su##") Then Exit Function
+    If LCase$(parts(1)) = "outputs" Then Exit Function
+    InTermFolder = True
+End Function
+
+' Creates path and any missing parent folders.
+Private Sub EnsureFolder(ByVal path As String)
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If path = "" Or fso.FolderExists(path) Then Exit Sub
+    EnsureFolder fso.GetParentFolderName(path)
+    fso.CreateFolder path
+End Sub
 
 Private Function IsDataFile(ByVal nm As String) As Boolean
     Select Case LCase$(Mid$(nm, InStrRev(nm, ".") + 1))
@@ -190,7 +226,7 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
     On Error GoTo Fail
     Set fso = CreateObject("Scripting.FileSystemObject")
     If Not fso.FolderExists(inDir) Then RunHash = "STOPPED: input folder not found: " & inDir: Exit Function
-    If Not fso.FolderExists(outDir) Then RunHash = "STOPPED: output folder not found: " & outDir: Exit Function
+    If Not fso.FolderExists(outDir) Then RunHash = "STOPPED: dev folder not found: " & outDir: Exit Function
     inDir = fso.GetAbsolutePathName(inDir)
     outDir = fso.GetAbsolutePathName(outDir)
     If StrComp(inDir, outDir, vbTextCompare) = 0 Then RunHash = "STOPPED: input and output folders are the same.": Exit Function
@@ -223,7 +259,7 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
             prompt = "Found " & newCols.Count & " column name(s) that are not in " & settingsName & "." & vbLf & vbLf & _
                      "Add them to " & settingsName & " with a suggested hash or keep for each, " & _
                      "so you can review them there?" & vbLf & vbLf & _
-                     "Nothing is written to inputs-dev this time." & vbLf & vbLf & _
+                     "Nothing is written to dev this time." & vbLf & vbLf & _
                      "OK = add them" & vbLf & "Cancel = stop (nothing is changed)"
             If Not Confirm(prompt, testConfirm) Then
                 Cleanup
@@ -245,7 +281,7 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
         If i > 15 Then review = review & vbLf & "  ... and " & (i - 15) & " more"
         Cleanup
         If testConfirm = "" Then OpenForReview settingsPath
-        RunHash = "STOPPED: nothing was written to inputs-dev." & vbLf & vbLf & _
+        RunHash = "STOPPED: nothing was written to dev." & vbLf & vbLf & _
                   i & " column(s) are marked NEW in the Check column of " & settingsName & ":" & review & vbLf & vbLf & _
                   "For each: check the suggested Action (hash or keep), change it if needed, " & _
                   "then delete the NEW text in Check. Save the file and run again."
@@ -264,6 +300,7 @@ Private Function RunHash(ByVal inDir As String, ByVal outDir As String, ByVal ke
         End If
         prompt = prompt & vbLf & vbLf & "OK = write it" & vbLf & "Cancel = skip this file"
         If Confirm(prompt, testConfirm) Then
+            EnsureFolder fso.GetParentFolderName(outDir & "\" & f)
             ProcessFile inDir & "\" & f, outDir & "\" & f, True, newCols, pending, blockers
             written = written & vbLf & "  " & f
             nWritten = nWritten + 1

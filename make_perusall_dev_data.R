@@ -10,13 +10,18 @@
 # Usage (from the project folder): MA_MODE=dev Rscript make_perusall_dev_data.R
 #   Run merge_rosters.R in dev mode first.
 #
+# Real formats this mimics:
+#   - All readings are sections of ONE epub document (the textbook); documents.csv
+#     also lists a peer-review upload. Readings are told apart by Assignment ID
+#     (document-views) and by the epub chapter index in Range / Section.
+#   - annotations, assignments, documents: Eastern time, M/D/YYYY H:MM (e.g. 8/23/2026 19:42)
+#   - document-views (and chapter-views): UTC ISO 8601 with milliseconds (2026-08-27T19:04:46.263Z)
+#   - Active engagement time: seconds in multiples of 60, often blank
+#   - Gradebook: scores 0-3, missed = 0; Average score = unrounded mean over the
+#     assignments past their deadline at download time (8 of 9 on 10/26)
 # GUESSES (no example seen yet; fix here if the real files differ):
-#   - User ID, Document ID, Assignment ID, Comment ID: 17-character IDs like Student ID
-#   - Course role: "student" / "instructor"
-#   - Content to assign, Document, Document name: the reading's name
-#   - Submission deadline, Opened at, Closed at: same M/D/YYYY H:MM format as Created
-#   - Group set name, Part, Range, Starred by me?, Total viewing time (minutes)
-#   - Average score: mean of the assignment scores, 2 decimals
+#   - the annotations Document column holds the document's name
+#   - the epub chapter ranges of each reading (made up)
 
 library(tidyverse)
 
@@ -33,16 +38,23 @@ roster_emails <- read_csv(roster_path, col_types = cols(.default = "c"))$Email
 
 set.seed(104)
 n_students <- 20
+download <- as.POSIXct("2026-10-26 21:34", tz = "America/New_York")
 
 # Perusall-style IDs: 17 characters, no easily confused characters
 id_chars <- strsplit("23456789ABCDEFGHJKLMNPQRSTWXYZabcdefghijkmnopqrstuvwxyz", "")[[1]]
 new_ids <- function(n) replicate(n, paste(sample(id_chars, 17, replace = TRUE), collapse = ""))
 fake_hash <- function(n) replicate(n, paste(sample(c(0:9, letters[1:6]), 16, replace = TRUE), collapse = ""))
 
-# M/D/YYYY H:MM, 24-hour, no leading zeros (e.g. 8/23/2026 19:42)
-fmt_time <- function(t) {
+# Eastern M/D/YYYY H:MM, 24-hour, no leading zeros (e.g. 8/23/2026 19:42)
+fmt_et <- function(t) {
+  t <- with_tz(t, "America/New_York")
   out <- paste0(month(t), "/", mday(t), "/", year(t), " ", hour(t), ":", sprintf("%02d", minute(t)))
   if_else(is.na(t), "", out)
+}
+# UTC ISO 8601 with milliseconds (e.g. 2026-08-27T19:04:46.263Z)
+fmt_utc <- function(t) {
+  t <- with_tz(t, "UTC")
+  paste0(format(t, "%Y-%m-%dT%H:%M:"), sprintf("%06.3f", floor(second(t) * 1000) / 1000), "Z")
 }
 et <- function(x) as.POSIXct(x, tz = "America/New_York")
 
@@ -64,23 +76,47 @@ students <- tibble(
 instructor <- tibble(user_id = new_ids(1), student_id = new_ids(1), first = "Pat", last = "Instructor",
                      email = fake_hash(1))
 
-# Reading assignment names and deadlines as in the real gradebook (course
-# material, not student data); the third name contains a comma on purpose.
-readings <- tibble(
-  assignment_id = new_ids(3),
-  document_id = new_ids(3),
-  name = c("GDP 1: Total Production and Does it Measure What We Want It To (Ch. 8.1 & 8.2)",
-           "Stocks and Bonds (Ch. 6.2)",
-           "GDP 2: Real GDP and, and Other Measures of Total Production and Income (Ch. 8.3 & 8.4)"),
-  document_name = c("Ch. 8.1 & 8.2", "Ch. 6.2", "Ch. 8.3 & 8.4"),
-  opens = et(c("2026-08-24 08:00", "2026-08-24 08:00", "2026-08-31 08:00")),
-  due = et(c("2026-08-31 23:59", "2026-08-31 23:59", "2026-09-07 23:59")),
-  due_text = c("Due August 31, 2026 at 11:59 PM EDT", "Due August 31, 2026 at 11:59 PM EDT",
-               "Due September 7, 2026 at 11:59 PM EDT"),
-  created = et(c("2026-08-20 10:15", "2026-08-20 10:22", "2026-08-21 09:40"))
+documents <- tibble(
+  `Document ID` = new_ids(2),
+  `Document name` = c("Peer review submission upload", "Macroeconomics, 9/e"),
+  `Uploaded by user ID` = "",
+  Created = c("8/12/2024 9:03", "3/28/2024 10:57")
 )
+textbook_id <- documents$`Document ID`[2]
+textbook_name <- documents$`Document name`[2]
 
-random_time <- function(from, to) from + runif(length(from)) * as.numeric(difftime(to, from, units = "secs"))
+# Reading assignments and deadlines as in the real assignments.csv (course
+# material, not student data); one name contains a comma on purpose.
+# ch_from/ch_to: made-up epub chapter indexes of each reading.
+readings <- tribble(
+  ~name, ~due, ~ch_from, ~ch_to,
+  "GDP 1: Total Production and Does it Measure What We Want It To (Ch. 8.1 & 8.2)", "2026-08-31 23:59", 187, 193,
+  "Stocks and Bonds (Ch. 6.2)", "2026-08-31 23:59", 142, 146,
+  "GDP 2: Real GDP and, and Other Measures of Total Production and Income (Ch. 8.3 & 8.4)", "2026-09-07 23:59", 194, 202,
+  "The Consumer Price Index (CPI) and Its Uses (Ch. 9.4 to 9.7)", "2026-09-14 23:59", 220, 226,
+  "Long-Run Growth 1 (Ch. 10.1)", "2026-09-30 23:59", 238, 241,
+  "Long-Run Growth 2 (Ch. 11.1 to 11.3)", "2026-10-07 23:59", 257, 269,
+  "Employment and Unemployment (Ch. 9.1 & 9.2)", "2026-10-26 23:59", 212, 218,
+  "The Business Cycle (Ch. 10.3)", "2026-10-26 23:59", 245, 248,
+  "Aggregate Demand and Supply (Ch. 13.1 & 13.2)", "2026-11-09 23:59", 320, 327
+) %>%
+  mutate(
+    due = et(due),
+    assignment_id = new_ids(n()),
+    opens = lag(due, default = et("2026-08-22 12:00")) - 3 * 86400,
+    until = pmin(due, download),  # activity stops at the download
+    due_text = paste0("Due ", format(due, "%B "), mday(due), format(due, ", %Y at 11:59 PM "),
+                      if_else(dst(due), "EDT", "EST"))
+  )
+
+# Random times between from and to, weighted toward the evening (Eastern)
+random_time <- function(from, to) {
+  t <- from + runif(length(from)) * as.numeric(difftime(to, from, units = "secs"))
+  late <- runif(length(t)) < 0.6
+  day <- floor_date(with_tz(t, "America/New_York"), "day")
+  t[late] <- pmin(to[late], pmax(from[late], day[late] + runif(sum(late), 18, 24) * 3600))
+  t
+}
 
 # ---- annotations: top-level comments, then replies to some of them ----
 phrases <- c("I think this means", "Why does", "This connects to the lecture on", "I am confused about",
@@ -97,35 +133,32 @@ fake_comment <- function(n) {
   })
 }
 
+# Fewer comments on the reading that is not yet due at the download
 top <- students %>%
-  crossing(readings %>% select(document_name, opens, due)) %>%
-  mutate(n = rpois(n(), 3 * effort) * (runif(n()) > 0.15)) %>%  # some students skip a reading
+  crossing(readings %>% select(name, opens, until, ch_from, ch_to)) %>%
+  mutate(n = rpois(n(), if_else(until < download, 2, 0.2) * effort) * (runif(n()) > 0.15)) %>%
   uncount(n) %>%
-  mutate(parent = "", created = random_time(opens, due))
+  mutate(comment_id = new_ids(n()), parent = "", created = random_time(opens, until),
+         chapter = map2_int(ch_from, ch_to, ~ sample(.x:.y, 1L)))
 
+# Each reply points at a top-level comment on the same reading and comes after it
 replies <- top %>%
+  filter(created < until - 120) %>%
   slice_sample(prop = 0.3) %>%
-  transmute(document_name, parent_created = created, due)
+  transmute(name, parent = comment_id, parent_created = created, until, chapter)
 replies <- replies %>%
   bind_cols(slice_sample(students, n = nrow(replies), replace = TRUE)) %>%
-  mutate(created = random_time(parent_created, due))
+  mutate(comment_id = new_ids(n()),
+         created = random_time(parent_created + 60, until))
 
 annotations <- bind_rows(top, replies %>% select(-parent_created)) %>%
-  mutate(comment_id = new_ids(n()))
-# Each reply points at a top-level comment on the same document
-top_ids <- annotations %>% filter(row_number() <= nrow(top)) %>% select(comment_id, document_name)
-reply_rows <- which(seq_len(nrow(annotations)) > nrow(top))
-annotations$parent[reply_rows] <- map_chr(reply_rows, function(i) {
-  sample(top_ids$comment_id[top_ids$document_name == annotations$document_name[i]], 1)
-})
-
-annotations <- annotations %>%
   mutate(
     text = fake_comment(n()),
     highlighted = if_else(parent == "", paste("Highlighted passage about", sample(topics, n(), replace = TRUE)), ""),
     edited = if_else(runif(n()) < 0.1, created + runif(n(), 60, 3600), created),
-    page = sample(1:30, n(), replace = TRUE),
-    start = sample(100:5000, n(), replace = TRUE)
+    start = sample(0:400, n(), replace = TRUE),
+    range = sprintf('{"cfi":"epubcfi(/8/%d[P7001018354000000000000000003E7A]!/4/2/2/4/1:%d,1:%d)","chapter":%d,"end":%d,"start":%d,"type":"text"}',
+                    2 * chapter, start, start + 72, chapter, start + 72, start)
   ) %>%
   arrange(created)
 
@@ -136,42 +169,43 @@ annotations_out <- annotations %>%
     `Last name` = last,
     `First name` = first,
     `Student ID` = student_id,
-    `Group set name` = "Discussion groups",
+    `Group set name` = "Group Set 1",
     `Group number` = group,
     `Highlighted text` = highlighted,
     `Comment text` = text,
     `Word count` = str_count(text, "\\S+"),
     Type = sample(c("comment", "question"), n(), replace = TRUE, prob = c(24163, 12682)),
     Score = sample(c("low", "medium", "high"), n(), replace = TRUE, prob = c(11, 10, 5)),
-    Created = fmt_time(created),
-    `Last edited at` = fmt_time(edited),
+    Created = fmt_et(created),
+    `Last edited at` = fmt_et(edited),
     Replies = map_int(comment_id, ~ sum(annotations$parent == .x)),
     Upvoters = sample(0:3, n(), replace = TRUE, prob = c(0.8, 0.12, 0.05, 0.03)),
-    `Starred by me?` = "",
+    `Starred by me?` = "No",
     Status = "",
-    Document = document_name,
+    Document = textbook_name,
     Part = "",
-    `Page number` = page,
-    Range = paste0(start, "-", start + sample(20:300, n(), replace = TRUE))
+    `Page number` = "",
+    Range = range
   )
 
-# ---- document-views: reading sessions; many have no active engagement time ----
+# ---- document-views: reading sessions; many very short, many without active time ----
 document_views <- students %>%
-  crossing(readings %>% select(document_id, assignment_id, opens, due)) %>%
-  mutate(n = rpois(n(), 4 * effort)) %>%
+  crossing(readings %>% select(assignment_id, opens, until)) %>%
+  mutate(n = rpois(n(), 3 * effort)) %>%
   uncount(n) %>%
   mutate(
-    opened = random_time(opens, due + 3 * 86400),  # some open after the deadline
-    closed = opened + runif(n(), 30, 5400),
-    active = if_else(runif(n()) < 0.4, NA_real_, 60 * pmax(1, round(runif(n(), 0, 1) * as.numeric(closed - opened, units = "mins"))))
+    opened = random_time(opens, until) + runif(n(), 0, 60),
+    closed = opened + if_else(runif(n()) < 0.4, runif(n(), 0.1, 1), runif(n(), 30, 5400)),
+    secs = as.numeric(difftime(closed, opened, units = "secs")),
+    active = if_else(runif(n()) < 0.4 | secs < 60, NA_real_, 60 * pmax(1, round(runif(n(), 0, 1) * secs / 60)))
   ) %>%
   arrange(opened) %>%
   transmute(
-    `Document ID` = document_id,
+    `Document ID` = textbook_id,
     `Assignment ID` = assignment_id,
     `User ID` = user_id,
-    `Opened at` = fmt_time(opened),
-    `Closed at` = fmt_time(closed),
+    `Opened at` = fmt_utc(opened),
+    `Closed at` = fmt_utc(closed),
     `Active engagement time` = active
   )
 
@@ -180,34 +214,33 @@ active_min <- round(runif(n_students, 37, 855) * students$effort, 2)
 active_min <- if_else(runif(n_students) < 0.3, round(active_min), active_min)
 users <- bind_rows(
   tibble(`User ID` = instructor$user_id, `Last name` = instructor$last, `First name` = instructor$first,
-         `Student ID` = instructor$student_id, `Email address` = instructor$email, `Course role` = "instructor",
+         `Student ID` = instructor$student_id, `Email address` = instructor$email, `Course role` = "Instructor",
          `Total viewing time (minutes)` = NA_real_, `Total active engagement time (minutes)` = NA_real_),
   tibble(`User ID` = students$user_id, `Last name` = students$last, `First name` = students$first,
-         `Student ID` = students$student_id, `Email address` = students$email, `Course role` = "student",
-         `Total viewing time (minutes)` = round(active_min * runif(n_students, 1.2, 2.5), 2),
+         `Student ID` = students$student_id, `Email address` = students$email, `Course role` = "Student",
+         `Total viewing time (minutes)` = round(active_min * runif(n_students, 3, 8), 2),
          `Total active engagement time (minutes)` = active_min)
 )
 
-documents <- readings %>%
-  transmute(`Document ID` = document_id, `Document name` = document_name,
-            `Uploaded by user ID` = instructor$user_id, Created = fmt_time(created))
-
 assignments <- readings %>%
-  transmute(`Content to assign` = document_name, `Assignment name` = name,
-            `Submission deadline` = fmt_time(due), Created = fmt_time(created))
+  transmute(`Content to assign` = "epub", `Assignment name` = name,
+            `Submission deadline` = fmt_et(due), Created = "8/11/2026 13:58")
 
 # ---- gradebook: header, then a due-date line and a points line, then students ----
-# Score 0-3 per assignment from the student's annotations on it; 0 if none.
+# Score 0-3 per assignment from the student's comments on it; 0 if none.
 scores <- students %>%
-  crossing(readings %>% select(document_name, name)) %>%
-  left_join(count(annotations, student_id, document_name), by = c("student_id", "document_name")) %>%
+  crossing(readings %>% select(name)) %>%
+  left_join(count(annotations, student_id, name), by = c("student_id", "name")) %>%
   mutate(score = pmin(3L, coalesce(n, 0L))) %>%
   select(student_id, name, score) %>%
   pivot_wider(names_from = name, values_from = score)
 
+# The real gradebook averaged the 8 readings due by 10/26 (scores in eighths),
+# so it was downloaded after that day's deadline.
+past_due <- readings$name[as_date(readings$due) <= as_date(download)]
 gradebook <- students %>%
   left_join(scores, by = "student_id") %>%
-  mutate(`Average score` = round(rowMeans(across(all_of(readings$name))), 2)) %>%
+  mutate(`Average score` = rowMeans(across(all_of(past_due)))) %>%
   arrange(last, first) %>%
   transmute(`Last name` = last, `First name` = first, `Student ID` = student_id,
             Group = paste("Group", group), Email = email, `Average score` = as.character(`Average score`),

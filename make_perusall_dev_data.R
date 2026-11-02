@@ -3,7 +3,9 @@
 # formats of the real exports (all-data export + gradebook) as described by
 # the instructor; nothing here is read from the real files.
 #
-# Writes to $MA/dev/<term>/perusall/ and refuses to run unless MA_MODE=dev.
+# Writes to $MA/dev/<term>/perusall/<download date>/ (one folder per download,
+# e.g. perusall/2026-10-26/, as for the real files) and refuses to run unless
+# MA_MODE=dev.
 # Emails in users.csv and the gradebook are taken from the dev (hashed) merged
 # roster, so joins to the roster can be tested; a few deliberately don't match.
 #
@@ -29,7 +31,8 @@ source("ma_paths.R")
 dirs <- ma_dirs()
 if (dirs$mode != "dev") stop("make_perusall_dev_data.R only writes fake data in dev mode; set MA_MODE=dev.")
 
-out_dir <- file.path(dirs$inputs, "perusall")
+download <- as.POSIXct("2026-10-26 21:34", tz = "America/New_York")
+out_dir <- file.path(dirs$inputs, "perusall", format(download, "%Y-%m-%d"))
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 roster_path <- file.path(dirs$outputs, "merged_roster.csv")
@@ -38,7 +41,6 @@ roster_emails <- read_csv(roster_path, col_types = cols(.default = "c"))$Email
 
 set.seed(104)
 n_students <- 20
-download <- as.POSIXct("2026-10-26 21:34", tz = "America/New_York")
 
 # Perusall-style IDs: 17 characters, no easily confused characters
 id_chars <- strsplit("23456789ABCDEFGHJKLMNPQRSTWXYZabcdefghijkmnopqrstuvwxyz", "")[[1]]
@@ -189,8 +191,8 @@ annotations_out <- annotations %>%
   )
 
 # ---- document-views: reading sessions; many very short, many without active time ----
-document_views <- students %>%
-  crossing(readings %>% select(assignment_id, opens, until)) %>%
+sessions <- students %>%
+  crossing(readings %>% select(assignment_id, opens, until, ch_from, ch_to)) %>%
   mutate(n = rpois(n(), 3 * effort)) %>%
   uncount(n) %>%
   mutate(
@@ -198,7 +200,9 @@ document_views <- students %>%
     closed = opened + if_else(runif(n()) < 0.4, runif(n(), 0.1, 1), runif(n(), 30, 5400)),
     secs = as.numeric(difftime(closed, opened, units = "secs")),
     active = if_else(runif(n()) < 0.4 | secs < 60, NA_real_, 60 * pmax(1, round(runif(n(), 0, 1) * secs / 60)))
-  ) %>%
+  )
+
+document_views <- sessions %>%
   arrange(opened) %>%
   transmute(
     `Document ID` = textbook_id,
@@ -208,6 +212,20 @@ document_views <- students %>%
     `Closed at` = fmt_utc(closed),
     `Active engagement time` = active
   )
+
+# ---- chapter-views: epub sections opened during each session (none for the
+# sub-second ones); mostly the reading's own sections, sometimes front matter (0-14)
+chapter_views <- sessions %>%
+  filter(secs >= 1) %>%
+  mutate(k = 1L + rpois(n(), 2)) %>%
+  uncount(k) %>%
+  mutate(
+    section = if_else(runif(n()) < 0.05, sample(0:14, n(), replace = TRUE),
+                      map2_int(ch_from, ch_to, ~ sample(.x:.y, 1L))),
+    at = opened + runif(n()) * secs
+  ) %>%
+  arrange(at) %>%
+  transmute(`Document ID` = textbook_id, `User ID` = user_id, Section = section, `Opened at` = fmt_utc(at))
 
 # ---- users ----
 active_min <- round(runif(n_students, 37, 855) * students$effort, 2)
@@ -257,7 +275,9 @@ write_csv(annotations_out, file.path(out_dir, "annotations.csv"), na = "")
 write_csv(assignments, file.path(out_dir, "assignments.csv"), na = "")
 write_csv(documents, file.path(out_dir, "documents.csv"), na = "")
 write_csv(document_views, file.path(out_dir, "document-views.csv"), na = "")
+write_csv(chapter_views, file.path(out_dir, "chapter-views.csv"), na = "")
 write_csv(gradebook, file.path(out_dir, "econ-104-fa26-gradebook.csv"), na = "")
 
-message("Wrote 6 fake Perusall files to ", out_dir, ": ", nrow(users) - 1, " students, ",
-        nrow(annotations_out), " annotations, ", nrow(document_views), " document views")
+message("Wrote 7 fake Perusall files to ", out_dir, ": ", nrow(users) - 1, " students, ",
+        nrow(annotations_out), " annotations, ", nrow(document_views), " document views, ",
+        nrow(chapter_views), " chapter views")

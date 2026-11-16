@@ -2,6 +2,7 @@
 # written or tested against real student data. Writes, for sections 2, 5 and 11:
 #   $MA/dev/<term>/iclicker/gradebook/sec_N/iClicker_GradesExport_Reef_MM-DD-YY.csv
 #   $MA/dev/<term>/iclicker/class_meetings/sec_N/iClicker_ClassK-Poll.xlsx
+#   $MA/dev/<term>/iclicker/focus/sec_N/Focus_ClassK.csv
 # Refuses to run unless MA_MODE=dev.
 #
 # Emails come from the dev (hashed) merged roster; one student per section is
@@ -31,6 +32,12 @@
 #   Any answer earns the point; participation (1 point) is earned by answering >= 75% of a
 #   meeting's questions; Class N - Poll = that meeting's Total.
 #   Summary Average % has 2 decimals, Question sheets 1.
+#   Focus report CSV, one per meeting per section. iClicker names it by download date
+#     (iClicker_FocusReportExport_MMDDYY.csv), which is useless, so the instructor renames
+#     it Focus_ClassN.csv. Last Name, First Name, Email, Student ID, Time In Focus,
+#     Time Out of Focus (H:MM:SS), Number of Times Left Focus, Joined Using Web (Y/N);
+#     "N/A" in the three measures for a student who didn't join. No summary rows.
+#     Every student listed, sorted by last name; same Email/Student ID as the gradebook.
 # Test cases built in (section 11): blank Email, icloud.com Email, bare "abc1234"
 #   Email, pau.edu typo -- each with a good Student ID (importer: use it, warn);
 #   a drop per section (good email, not on roster: report); a peer-instruction
@@ -44,6 +51,9 @@
 #     slide titles "Question k" (a re-vote repeats the first vote's slide)
 #   - The line break in "Question k<newline>Multiple Choice": openxlsx saves it as
 #     CRLF on Windows; Excel may use LF -- importers should accept either
+#   - Focus reports: ties broken by first name and case ignored when sorting; "Joined Using
+#     Web" (Y = browser, N = app?) fixed per student; present = answered or skipped polls
+#     that day; CRLF, no BOM, like the gradebook
 
 library(tidyverse)
 library(openxlsx)
@@ -297,6 +307,35 @@ for (s in sections) {
   write_crlf_csv(names(gb), gb, file.path(out, paste0(gb_name, suffixes[[s]], ".csv")))
 }
 
-message("Wrote ", length(sections), " gradebooks and ", length(sections) * length(classes),
-        " class-meeting workbooks to ", ic_dir, " (", nrow(students), " students, ",
+# ---- Focus reports ----------------------------------------------------------
+# One CSV per meeting per section; every student listed. Present students get
+# time in/out of focus summing to their time in class (up to the 75-minute
+# meeting); absent ones get N/A in all three measures.
+hms <- function(sec) sprintf("%d:%02d:%02d", sec %/% 3600, sec %/% 60 %% 60, sec %% 60)
+present <- responses %>% distinct(section, class, name, present)
+students <- students %>% mutate(web = runif(n()) < 0.15, focus = rbeta(n(), 2, 2))
+for (s in sections) {
+  out <- file.path(ic_dir, "focus", paste0("sec_", s))
+  dir.create(out, recursive = TRUE, showWarnings = FALSE)
+  for (n in classes) {
+    fr <- students %>%
+      filter(section == s) %>%
+      inner_join(filter(present, section == s, class == n), by = c("section", "name")) %>%
+      mutate(last = sub(", .*", "", name), first = sub(".*?, ", "", name),
+             joined = if_else(present, as.integer(75 * 60 - pmin(rexp(n(), 1 / 240), 1800)), NA_integer_),
+             share = pmin(pmax(focus + rnorm(n(), 0, 0.1), 0), 1),
+             infocus = as.integer(round(joined * share)),
+             left = if_else(joined - infocus > 0, pmax(1L, rpois(n(), 1 + 10 * (1 - share))), 0L)) %>%
+      arrange(tolower(last), tolower(first)) %>%
+      transmute(`Last Name` = last, `First Name` = first, Email = gb_email, `Student ID` = gb_sid,
+                `Time In Focus` = if_else(present, hms(infocus), "N/A"),
+                `Time Out of Focus` = if_else(present, hms(joined - infocus), "N/A"),
+                `Number of Times Left Focus` = if_else(present, as.character(left), "N/A"),
+                `Joined Using Web` = if_else(web, "Y", "N"))
+    write_crlf_csv(names(fr), fr, file.path(out, paste0("Focus_Class", n, ".csv")))
+  }
+}
+
+message("Wrote ", length(sections), " gradebooks, ", length(sections) * length(classes),
+        " class-meeting workbooks and as many focus reports to ", ic_dir, " (", nrow(students), " students, ",
         sum(students$email %in% roster$Email), " on the dev roster).")
